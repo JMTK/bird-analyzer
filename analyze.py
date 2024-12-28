@@ -30,7 +30,6 @@ os.makedirs("archives", exist_ok=True)
 species_in_area = birdnet.predict_species_at_location_and_time(35.055851, -80.684868)
 print("Found " + str(len(species_in_area)) + " species in your area")
 
-
 def send_discord_notification(bird: Bird, webhook_url: str):
     embed = {
         "title": bird.name,
@@ -71,12 +70,11 @@ while True:
     predictions = birdnet.SpeciesPredictions(birdnet.predict_species_within_audio_file(
       Path(filename),
       species_filter=set(species_in_area.keys()),
-      min_confidence=0.5,
+      min_confidence=0.4,
       silent=True
     ))
 
     # get most probable prediction at time interval 0s-3s
-
     prediction_list = list(predictions[(0.0, duration)].items())
 
     if (len(prediction_list) != 0):
@@ -86,12 +84,11 @@ while True:
       encodedName = urllib.parse.quote(regular_name, safe='/', encoding=None, errors=None)
       url = f"https://nuthatch.lastelm.software/v2/birds?page=1&pageSize=25&name={regular_name}&sciName={scientific_name}&operator=OR"
       r=requests.get(url, headers={"API-Key":api_key})
-      jsonResponse = r.json()
-      response = Response.from_dict(jsonResponse)
+      response = Response.from_dict(r.json())
       if (len(response.entities) != 0):
         bird = response.entities[0]
         print(bird)
-        shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav")
+        shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav")
         webhook_url = "https://discord.com/api/webhooks/1322685037019402340/mUltuxrIq0MaxQbrG4fTNu4luvpfvU-64YuD3lUjsAWH5SCM5mh-GWE8eVhVliLBm1d1"
         send_discord_notification(bird, webhook_url)
       else:
