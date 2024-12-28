@@ -1,8 +1,11 @@
+import datetime
+import os
 from pathlib import Path
 import random
 from time import sleep
 import warnings
 import requests
+import shutil
 
 import birdnet.audio_based_prediction
 import birdnet.utils
@@ -22,6 +25,7 @@ samplerate = 48000  # Hertz
 duration = 3  # seconds
 filename = 'output.wav'
 api_key="8071c1f1-351c-438d-8650-1d47bd95442c"
+os.makedirs("archives", exist_ok=True)
 
 species_in_area = birdnet.predict_species_at_location_and_time(35.055851, -80.684868)
 print("Found " + str(len(species_in_area)) + " species in your area")
@@ -87,9 +91,9 @@ while True:
       if (len(response.entities) != 0):
         bird = response.entities[0]
         print(bird)
+        shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav")
         webhook_url = "https://discord.com/api/webhooks/1322685037019402340/mUltuxrIq0MaxQbrG4fTNu4luvpfvU-64YuD3lUjsAWH5SCM5mh-GWE8eVhVliLBm1d1"
         send_discord_notification(bird, webhook_url)
-        sleep(30)
       else:
         print("Couldn't find bird in API")
     else: 
@@ -100,3 +104,4 @@ while True:
 
   except Exception as e:
     print(e)
+    sleep(1)
