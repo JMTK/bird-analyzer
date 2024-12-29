@@ -16,15 +16,22 @@ warnings.filterwarnings("ignore")
 import absl.logging
 absl.logging.set_verbosity(absl.logging.ERROR)
 # create birdnet instance for v2.4
+from config import *
 
+import elasticsearch
+print("Initializing elasticsearch...")
+
+es = elasticsearch.Elasticsearch(elasticsearch_host, ca_certs=cert_loc,
+                http_auth=(elasticsearch_user, elasticsearch_password))
+
+es.indices.create(index="bird-analyzer")
 import birdnet
 import sounddevice as sd
 import soundfile as sf
-
+print("Initializing birdnet...")
 samplerate = 48000  # Hertz
 duration = 3  # seconds
 filename = 'output.wav'
-api_key="8071c1f1-351c-438d-8650-1d47bd95442c"
 os.makedirs("archives", exist_ok=True)
 
 species_in_area = birdnet.predict_species_at_location_and_time(35.055851, -80.684868)
@@ -77,24 +84,29 @@ while True:
     # get most probable prediction at time interval 0s-3s
     prediction_list = list(predictions[(0.0, duration)].items())
 
-    if (len(prediction_list) != 0):
-      prediction, confidence = prediction_list[0]
-      scientific_name, regular_name = prediction.split("_")
+    for prediction in prediction_list:
+      names, confidence = prediction
+      scientific_name, regular_name = names.split("_")
       print(f"Predicted '{regular_name}' with a confidence of {confidence:.2f}")
       encodedName = urllib.parse.quote(regular_name, safe='/', encoding=None, errors=None)
       url = f"https://nuthatch.lastelm.software/v2/birds?page=1&pageSize=25&name={regular_name}&sciName={scientific_name}&operator=OR"
       r=requests.get(url, headers={"API-Key":api_key})
-      response = Response.from_dict(r.json())
+      responseDict = r.json()
+      response = Response.from_dict(responseDict)
       if (len(response.entities) != 0):
         bird = response.entities[0]
         print(bird)
-        shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav")
+        timestamp = datetime.datetime.now()
+        dict = bird.__dict__
+        dict["timestamp"] = timestamp
+        es.index(index="bird-analyzer",
+                    document=dict
+        )
+        shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}.wav")
         webhook_url = "https://discord.com/api/webhooks/1322685037019402340/mUltuxrIq0MaxQbrG4fTNu4luvpfvU-64YuD3lUjsAWH5SCM5mh-GWE8eVhVliLBm1d1"
-        send_discord_notification(bird, webhook_url)
+        #send_discord_notification(bird, webhook_url)
       else:
         print("Couldn't find bird in API")
-    else: 
-      print("No prediction found")
 
   except KeyboardInterrupt:
     break

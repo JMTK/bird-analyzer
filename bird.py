@@ -16,7 +16,7 @@ class Bird:
     family: str
     order: str
     status: str
-
+    
     @staticmethod
     def from_dict(obj: Any) -> 'Bird':
         _images = [str(y) for y in obj.get("images")]
