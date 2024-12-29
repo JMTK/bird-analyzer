@@ -2,3 +2,4 @@ output.wav
 .DS_Store
 archives
 http_ca.crt
+*.wav

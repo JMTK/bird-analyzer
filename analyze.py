@@ -24,7 +24,7 @@ print("Initializing elasticsearch...")
 es = elasticsearch.Elasticsearch(elasticsearch_host, ca_certs=cert_loc,
                 http_auth=(elasticsearch_user, elasticsearch_password))
 
-es.indices.create(index="bird-analyzer")
+queued_es_docs = []
 import birdnet
 import sounddevice as sd
 import soundfile as sf
@@ -32,6 +32,9 @@ print("Initializing birdnet...")
 samplerate = 48000  # Hertz
 duration = 3  # seconds
 filename = 'output.wav'
+is_test = os.path.exists('test.wav')
+if is_test:
+  filename = 'test.wav'
 os.makedirs("archives", exist_ok=True)
 
 species_in_area = birdnet.predict_species_at_location_and_time(35.055851, -80.684868)
@@ -66,11 +69,12 @@ def send_discord_notification(bird: Bird, webhook_url: str):
 
 while True:
   try:
-    print("Recording for " + str(duration) + " seconds")
-    mydata = sd.rec(int(samplerate * duration), samplerate=samplerate,
-                    channels=1, blocking=True)
-    print("Finished recording")
-    sf.write(filename, mydata, samplerate)
+    if not is_test:
+      print("Recording for " + str(duration) + " seconds")
+      mydata = sd.rec(int(samplerate * duration), samplerate=samplerate,
+                      channels=1, blocking=True)
+      print("Finished recording")
+      sf.write(filename, mydata, samplerate)
 
     print("Getting predictions...")
     # predict species within the whole audio file
@@ -83,7 +87,7 @@ while True:
 
     # get most probable prediction at time interval 0s-3s
     prediction_list = list(predictions[(0.0, duration)].items())
-
+    print("Found " + str(len(prediction_list)) + " predictions")
     for prediction in prediction_list:
       names, confidence = prediction
       scientific_name, regular_name = names.split("_")
@@ -99,10 +103,20 @@ while True:
         timestamp = datetime.datetime.now()
         dict = bird.__dict__
         dict["timestamp"] = timestamp
-        es.index(index="bird-analyzer",
-                    document=dict
-        )
+
+        try:
+          es.indices.create(index="bird-analyzer", ignore=400)
+          es.index(index="bird-analyzer", document=dict)
+          for doc in queued_es_docs:
+            print("Indexing queued docs into elasticsearch: " + str(doc))
+            es.index(index="bird-analyzer", document=doc)
+          queued_es_docs = []
+        except Exception as e:
+          print("Failed to index into elasticsearch" + str(e))
+          queued_es_docs.append(dict)
+
         shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}.wav")
+        sleep(5)
         webhook_url = "https://discord.com/api/webhooks/1322685037019402340/mUltuxrIq0MaxQbrG4fTNu4luvpfvU-64YuD3lUjsAWH5SCM5mh-GWE8eVhVliLBm1d1"
         #send_discord_notification(bird, webhook_url)
       else:
@@ -112,5 +126,5 @@ while True:
     break
 
   except Exception as e:
-    print(e)
+    print("Error: " + str(e))
     sleep(1)

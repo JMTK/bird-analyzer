@@ -1,6 +1,5 @@
 import os
 
-
 elasticsearch_host = "https://localhost:9200"
 elasticsearch_user = "elastic"
 elasticsearch_password = "Dzz5Jezj4krwnqcM8cQn"
