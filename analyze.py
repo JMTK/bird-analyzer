@@ -6,28 +6,26 @@ from time import sleep
 import warnings
 import requests
 import shutil
-
 import birdnet.audio_based_prediction
 import birdnet.utils
 import urllib
 from bird import Bird, Response
-import json
-warnings.filterwarnings("ignore")
 import absl.logging
-absl.logging.set_verbosity(absl.logging.ERROR)
-# create birdnet instance for v2.4
 from config import *
-
 import elasticsearch
-print("Initializing elasticsearch...")
-
-es = elasticsearch.Elasticsearch(elasticsearch_host, ca_certs=cert_loc,
-                http_auth=(elasticsearch_user, elasticsearch_password))
-
-queued_es_docs = []
 import birdnet
 import sounddevice as sd
 import soundfile as sf
+
+warnings.filterwarnings("ignore")
+absl.logging.set_verbosity(absl.logging.ERROR)
+print("Initializing elasticsearch...")
+
+es = elasticsearch.Elasticsearch(elasticsearch_host, ca_certs=cert_loc,
+                http_auth=(elasticsearch_user, elasticsearch_password), max_retries=0, retry_on_timeout=False)
+
+queued_es_docs = []
+
 print("Initializing birdnet...")
 samplerate = 48000  # Hertz
 duration = 3  # seconds
@@ -68,6 +66,10 @@ def send_discord_notification(bird: Bird, webhook_url: str):
         print(f"Failed to send notification: {response.status_code} - {response.text}")
 
 while True:
+  if (len(queued_es_docs) != 0):
+    for doc in queued_es_docs:
+      es.index(index="bird-analyzer", document=doc)
+    queued_es_docs = []
   try:
     if not is_test:
       print("Recording for " + str(duration) + " seconds")
@@ -81,7 +83,7 @@ while True:
     predictions = birdnet.SpeciesPredictions(birdnet.predict_species_within_audio_file(
       Path(filename),
       species_filter=set(species_in_area.keys()),
-      min_confidence=0.4,
+      min_confidence=0.1,
       silent=True
     ))
 
@@ -99,26 +101,26 @@ while True:
       response = Response.from_dict(responseDict)
       if (len(response.entities) != 0):
         bird = response.entities[0]
-        print(bird)
         timestamp = datetime.datetime.now()
         dict = bird.__dict__
         dict["timestamp"] = timestamp
+        dict["confidence"] = confidence
+        
+        print(dict)
 
         try:
           es.indices.create(index="bird-analyzer", ignore=400)
           es.index(index="bird-analyzer", document=dict)
-          for doc in queued_es_docs:
-            print("Indexing queued docs into elasticsearch: " + str(doc))
-            es.index(index="bird-analyzer", document=doc)
-          queued_es_docs = []
         except Exception as e:
-          print("Failed to index into elasticsearch" + str(e))
+          print("Failed to index into elasticsearch: " + str(e))
           queued_es_docs.append(dict)
 
-        shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}.wav")
         sleep(5)
-        webhook_url = "https://discord.com/api/webhooks/1322685037019402340/mUltuxrIq0MaxQbrG4fTNu4luvpfvU-64YuD3lUjsAWH5SCM5mh-GWE8eVhVliLBm1d1"
-        #send_discord_notification(bird, webhook_url)
+        if confidence > 0.6:
+          shutil.copy(filename, f"archives/{scientific_name}_{regular_name}_{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}.wav")
+          #send_discord_notification(bird, webhook_url)
+        else:
+          print("Confidence too low to send notification: " + str(confidence))
       else:
         print("Couldn't find bird in API")
 

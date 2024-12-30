@@ -3,3 +3,7 @@ output.wav
 archives
 http_ca.crt
 *.wav
+install-pyenv-win.ps1
+__pycache__/bird.cpython-311.pyc
+__pycache__/config.cpython-311.pyc
+config.py
