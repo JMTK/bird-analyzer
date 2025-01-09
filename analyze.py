@@ -24,6 +24,12 @@ print("Initializing elasticsearch...")
 es = elasticsearch.Elasticsearch(elasticsearch_host, ca_certs=cert_loc,
                 http_auth=(elasticsearch_user, elasticsearch_password), max_retries=0, retry_on_timeout=False)
 
+try:
+    es.ping()
+    print("Elasticsearch initialized!")
+except Exception as e:
+    print("Elasticsearch failed to initialize!")
+
 queued_es_docs = []
 
 print("Initializing birdnet...")
@@ -73,6 +79,7 @@ while True:
   try:
     if not is_test:
       print("Recording for " + str(duration) + " seconds")
+      #print(sd.query_devices())
       mydata = sd.rec(int(samplerate * duration), samplerate=samplerate,
                       channels=1, blocking=True)
       print("Finished recording")
@@ -101,7 +108,7 @@ while True:
       response = Response.from_dict(responseDict)
       if (len(response.entities) != 0):
         bird = response.entities[0]
-        timestamp = datetime.datetime.now()
+        timestamp = datetime.datetime.now(datetime.timezone.utc)
         dict = bird.__dict__
         dict["timestamp"] = timestamp
         dict["confidence"] = confidence
