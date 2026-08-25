@@ -6,10 +6,15 @@ import random
 import shutil
 import threading
 import importlib.util
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from time import sleep
 from uuid import uuid4
 import warnings
+
+# Cap numeric library thread pools before importing them so model inference can't
+# saturate every core and starve the real-time audio capture thread (e.g. on a Raspberry Pi).
+for _thread_env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "ORT_NUM_THREADS"):
+  os.environ.setdefault(_thread_env_var, "2")
 
 import absl.logging
 import birdnet
@@ -77,22 +82,41 @@ stop_event = threading.Event()
 recordings_queue: Queue[dict] = Queue(maxsize=40)
 selected_input_device: int | str | None = None
 
+# Reused across requests to avoid re-negotiating TCP/TLS for every prediction lookup.
+HTTP_SESSION = requests.Session()
+# Processor thread is single-threaded, so a plain dict is safe without locking.
+species_metadata_cache: dict[str, dict] = {}
+
+# Recorder, processor, and main threads all call write_status concurrently;
+# guard the file write and throttle frequency to limit SD-card wear on devices like a Raspberry Pi.
+STATUS_LOCK = threading.Lock()
+STATUS_MIN_INTERVAL_SECONDS = 1.0
+_last_status_write = 0.0
+
 
 def utc_now_iso() -> str:
   return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def write_status(state: str, extra: dict | None = None) -> None:
-  payload = {
-    "pid": os.getpid(),
-    "state": state,
-    "heartbeat": utc_now_iso(),
-    "queue_size": recordings_queue.qsize(),
-    "is_test_mode": is_test,
-  }
-  if extra:
-    payload.update(extra)
-  STATUS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+def write_status(state: str, extra: dict | None = None, force: bool = False) -> None:
+  global _last_status_write
+
+  now = datetime.datetime.now().timestamp()
+  with STATUS_LOCK:
+    if not force and (now - _last_status_write) < STATUS_MIN_INTERVAL_SECONDS:
+      return
+    _last_status_write = now
+
+    payload = {
+      "pid": os.getpid(),
+      "state": state,
+      "heartbeat": utc_now_iso(),
+      "queue_size": recordings_queue.qsize(),
+      "is_test_mode": is_test,
+    }
+    if extra:
+      payload.update(extra)
+    STATUS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def create_es_client() -> elasticsearch.Elasticsearch:
@@ -179,6 +203,13 @@ def compute_audio_features(file_path: Path) -> dict:
 def recording_loop(es: elasticsearch.Elasticsearch) -> None:
   print("Recorder thread started")
   while not stop_event.is_set():
+    # Throttle recording before capturing audio so a slow processor thread can catch up
+    # instead of piling up unprocessed WAV files on disk.
+    if recordings_queue.full():
+      write_status("running", {"last_error": "Processing queue full; pausing recording"})
+      sleep(1)
+      continue
+
     timestamp = datetime.datetime.now(datetime.timezone.utc)
     recording_id = str(uuid4())
     output_file = RECORDINGS_DIR / f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{recording_id}.wav"
@@ -208,7 +239,13 @@ def recording_loop(es: elasticsearch.Elasticsearch) -> None:
         "status": "recorded",
       }
       safe_index(es, AUDIO_INDEX_NAME, audio_doc, doc_id=recording_id)
-      recordings_queue.put(audio_doc, timeout=5)
+      try:
+        recordings_queue.put(audio_doc, timeout=5)
+      except Full:
+        # Processor didn't catch up in time; drop the file instead of leaking disk space.
+        print(f"Processing queue still full after wait; discarding {output_file}")
+        safe_update(es, AUDIO_INDEX_NAME, recording_id, {"status": "dropped", "error": "queue full"})
+        output_file.unlink(missing_ok=True)
       write_status("running")
     except Exception as exc:
       print("Recording error: " + str(exc))
@@ -294,29 +331,34 @@ def process_recording(
       top_name = regular_name
 
     print(f"Predicted '{regular_name}' with a confidence of {confidence:.2f}")
-    url = (
-      "https://nuthatch.lastelm.software/v2/birds?page=1&pageSize=25"
-      f"&name={regular_name}&sciName={scientific_name}&operator=OR"
-    )
 
     try:
-      api_response = requests.get(url, headers={"API-Key": CONFIG["api_key"]}, timeout=10)
-      response_dict = api_response.json()
-      bird_response = Response.from_dict(response_dict)
-      if bird_response.entities:
-        bird = bird_response.entities[0]
-        metadata_doc = bird.__dict__.copy()
-      else:
-        metadata_doc = {
-          "name": regular_name,
-          "sciName": scientific_name,
-          "images": [],
-          "region": [],
-          "family": "",
-          "order": "",
-          "status": "",
-        }
+      cache_key = f"{scientific_name}|{regular_name}"
+      cached_metadata = species_metadata_cache.get(cache_key)
+      if cached_metadata is None:
+        url = (
+          "https://nuthatch.lastelm.software/v2/birds?page=1&pageSize=25"
+          f"&name={regular_name}&sciName={scientific_name}&operator=OR"
+        )
+        api_response = HTTP_SESSION.get(url, headers={"API-Key": CONFIG["api_key"]}, timeout=10)
+        response_dict = api_response.json()
+        bird_response = Response.from_dict(response_dict)
+        if bird_response.entities:
+          bird = bird_response.entities[0]
+          cached_metadata = bird.__dict__.copy()
+        else:
+          cached_metadata = {
+            "name": regular_name,
+            "sciName": scientific_name,
+            "images": [],
+            "region": [],
+            "family": "",
+            "order": "",
+            "status": "",
+          }
+        species_metadata_cache[cache_key] = cached_metadata
 
+      metadata_doc = cached_metadata.copy()
       metadata_doc.update(
         {
           "timestamp": datetime.datetime.now(datetime.timezone.utc),
@@ -392,7 +434,6 @@ def processor_loop(es: elasticsearch.Elasticsearch, species_in_area: dict | None
       write_status("running", {"last_error": str(exc)})
     finally:
       recordings_queue.task_done()
-      write_status("running")
 
 
 def main() -> None:
@@ -465,7 +506,7 @@ def main() -> None:
   else:
     print("Warning: Geo model not available, proceeding without geographical filtering")
   
-  write_status("running", {"species_count": len(species_in_area) if species_in_area else 0})
+  write_status("running", {"species_count": len(species_in_area) if species_in_area else 0}, force=True)
 
   recorder = threading.Thread(target=recording_loop, args=(es,), daemon=True)
   processor = threading.Thread(target=processor_loop, args=(es, species_in_area), daemon=True)
@@ -481,7 +522,7 @@ def main() -> None:
     stop_event.set()
     recorder.join(timeout=5)
     processor.join(timeout=5)
-    write_status("stopped")
+    write_status("stopped", force=True)
 
 
 if __name__ == "__main__":
