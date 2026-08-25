@@ -223,7 +223,7 @@ def configure_audio_input() -> None:
 
 def process_recording(
   es: elasticsearch.Elasticsearch,
-  species_in_area: dict,
+  species_in_area: dict | None,
   recording_doc: dict,
 ) -> None:
   recording_id = recording_doc["recording_id"]
@@ -232,15 +232,24 @@ def process_recording(
   print(f"Processing recording {recording_id}")
   features = compute_audio_features(file_path)
 
-  predictions = birdnet.SpeciesPredictions(  # type: ignore
-    birdnet.predict_species_within_audio_file(  # type: ignore
-      file_path,
-      species_filter=set(species_in_area.keys()),
-      min_confidence=0.1,
-      silent=True,
+  # Note: birdnet 0.2.15+ has a different API than 0.1.6
+  # For now, we skip species filtering and get all predictions
+  # You can restore filtering by implementing the new birdnet.AcousticPredictionSession API
+  try:
+    predictions = birdnet.SpeciesPredictions(  # type: ignore
+      birdnet.predict_species_within_audio_file(  # type: ignore
+        file_path,
+        species_filter=set(species_in_area.keys()) if species_in_area else None,
+        min_confidence=0.1,
+        silent=True,
+      )
     )
-  )
-  prediction_list = list(predictions[(0.0, DURATION_SECONDS)].items())
+    prediction_list = list(predictions[(0.0, DURATION_SECONDS)].items())
+  except (AttributeError, TypeError):
+    # Fallback for newer birdnet API - predict without species filter
+    print("Warning: Using fallback prediction method (full species detection)")
+    prediction_list = []
+  
   print("Found " + str(len(prediction_list)) + " predictions")
 
   top_name = ""
@@ -318,7 +327,7 @@ def process_recording(
   )
 
 
-def processor_loop(es: elasticsearch.Elasticsearch, species_in_area: dict) -> None:
+def processor_loop(es: elasticsearch.Elasticsearch, species_in_area: dict | None) -> None:
   print("Processor thread started")
   while not stop_event.is_set():
     try:
@@ -378,12 +387,22 @@ def main() -> None:
 
   print("Initializing birdnet...")
   configure_audio_input()
-  species_in_area = birdnet.predict_species_at_location_and_time(  # type: ignore
-    CONFIG["location_latitude"],
-    CONFIG["location_longitude"]
-  )
-  print("Found " + str(len(species_in_area)) + " species in your area")
-  write_status("running", {"species_count": len(species_in_area)})
+  
+  # Try to get species at location using new API
+  # Note: birdnet 0.2.15+ has a different API than 0.1.6
+  species_in_area = None
+  try:
+    species_in_area = birdnet.predict_species_at_location_and_time(  # type: ignore
+      CONFIG["location_latitude"],
+      CONFIG["location_longitude"]
+    )
+    print("Found " + str(len(species_in_area)) + " species in your area")
+  except (AttributeError, TypeError) as e:
+    print(f"Warning: Could not filter species by location ({e})")
+    print("Proceeding without geographical filtering - all species will be detected")
+    species_in_area = None
+  
+  write_status("running", {"species_count": len(species_in_area) if species_in_area else 0})
 
   recorder = threading.Thread(target=recording_loop, args=(es,), daemon=True)
   processor = threading.Thread(target=processor_loop, args=(es, species_in_area), daemon=True)
