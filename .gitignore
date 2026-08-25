@@ -6,3 +6,4 @@ http_ca.crt
 install-pyenv-win.ps1
 __pycache__/*
 config.py
+runtime/*

@@ -25,6 +25,21 @@ Either backend stores the same two document types:
 *   `bird-audio`: one document per recorded audio file with state (recorded/processed/failed) and acoustic features (pitch, spectral centroid, bandwidth, RMS)
 *   `bird-analyzer`: processed species detections with metadata from BirdNET and enrichment API
 
+SQLite Schema
+~~~~~~~~~~~~~
+
+The SQLite database path is set by `sqlite_path` (by default,
+`runtime/bird-analyzer.db`). It contains two tables:
+
+| Table | Columns | Contents |
+| --- | --- | --- |
+| `audio` | `recording_id TEXT PRIMARY KEY`, `timestamp TEXT`, `document TEXT NOT NULL` | One row per recording. `document` is JSON containing the recording path, sample rate, duration, processing status, top prediction, confidence, and acoustic features. |
+| `metadata` | `id INTEGER PRIMARY KEY AUTOINCREMENT`, `timestamp TEXT`, `document TEXT NOT NULL` | One row per BirdNET detection. `document` is JSON containing the common and scientific names, detection confidence, recording reference, acoustic features, and optional enrichment metadata. |
+
+Both tables have a timestamp index (`idx_audio_timestamp` and
+`idx_metadata_timestamp`) for newest-first dashboard queries. The JSON payloads
+allow new metadata fields to be stored without a database migration.
+
 Web Dashboard & API
 -------------------
 
@@ -56,6 +71,7 @@ Settings are loaded from `config.py` (or `config.example.py` as fallback). Requi
 *   `offline_mode`: when `True`, prevents BirdNET model downloads while allowing cached models to load
 *   `allow_model_downloads`: defaults to `False`; set to `True` temporarily while connected to download missing BirdNET model assets
 *   `enable_online_enrichment`: set to `True` with an `api_key` to request optional Nuthatch metadata
+*   `nuthatch_hourly_limit`: defaults to `500`; shared SQLite cache and request ledger enforce this limit across live enrichment and dashboard backfill
 *   `audio_device_override`: specific audio device index or name (optional; defaults to first available input device)
 *   `location_latitude` / `location_longitude`: geographic coordinates for species predictions
 

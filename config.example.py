@@ -12,6 +12,8 @@ offline_mode = False
 # Set to True only while connected to download missing BirdNET model assets.
 allow_model_downloads = True
 enable_online_enrichment = True
+# Shared limit across the analyzer and dashboard backfill.
+nuthatch_hourly_limit = 500
 
 # Storage backend for recordings/predictions: "elasticsearch" or "sqlite".
 # sqlite is a good fit for low-power devices like a Raspberry Pi since it needs no external service.

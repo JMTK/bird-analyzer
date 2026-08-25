@@ -8,6 +8,15 @@ async function getJson(url) {
   return response.json();
 }
 
+async function postJson(url) {
+  const response = await fetch(url, { method: "POST" });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.reason || `Request failed for ${url}`);
+  }
+  return body;
+}
+
 function fmt(value, fallback = "-") {
   if (value === null || value === undefined || value === "") {
     return fallback;
@@ -74,12 +83,17 @@ function projectPoint(point, rotation, projection) {
   };
 }
 
-function D3CallSpaceGraph({ points }) {
+function D3CallSpaceGraph({ points, visibleUntil }) {
   const svgRef = useRef(null);
   const wrapperRef = useRef(null);
   const [rotation, setRotation] = useState({ yaw: 0.68, pitch: 0.42 });
   const [zoom, setZoom] = useState(1);
   const [tooltip, setTooltip] = useState(null);
+
+  const visiblePoints = useMemo(
+    () => points.filter((point) => !visibleUntil || Date.parse(point.timestamp) <= visibleUntil),
+    [points, visibleUntil]
+  );
 
   const normalized = useMemo(() => {
     const xExtent = d3.extent(points, (p) => Number(p.x_pitch_hz || 0));
@@ -98,7 +112,7 @@ function D3CallSpaceGraph({ points }) {
       confidence: Number(p.confidence || 0),
       energy: Number(p.energy_rms || 0),
     }));
-  }, [points]);
+  }, [visiblePoints]);
 
   useEffect(() => {
     const svg = d3.select(svgRef.current);
@@ -124,9 +138,9 @@ function D3CallSpaceGraph({ points }) {
     const graphLayer = svg.append("g");
 
     const axisVectors = [
-      { key: "x", label: "Pitch", point: { x: 1.2, y: 0, z: 0 }, color: "#d8572a" },
-      { key: "y", label: "Timbre", point: { x: 0, y: 1.2, z: 0 }, color: "#2f7f79" },
-      { key: "z", label: "Spread", point: { x: 0, y: 0, z: 1.2 }, color: "#3a5db5" },
+      { point: { x: 1.2, y: 0, z: 0 }, color: "#d8572a" },
+      { point: { x: 0, y: 1.2, z: 0 }, color: "#2f7f79" },
+      { point: { x: 0, y: 0, z: 1.2 }, color: "#3a5db5" },
     ];
 
     const originProjected = projectPoint({ x: 0, y: 0, z: 0 }, rotation, projection);
@@ -143,13 +157,6 @@ function D3CallSpaceGraph({ points }) {
         .attr("stroke-width", 2.2)
         .attr("opacity", 0.9);
 
-      graphLayer
-        .append("text")
-        .attr("x", p.sx + 8)
-        .attr("y", p.sy - 6)
-        .attr("class", "axis-label")
-        .style("fill", axis.color)
-        .text(axis.label);
     });
 
     const bounds = [-1, 1];
@@ -279,6 +286,11 @@ function D3CallSpaceGraph({ points }) {
   return (
     <div className="plot d3-plot" ref={wrapperRef}>
       <svg ref={svgRef} className="plot-svg" />
+      <div className="axis-legend" aria-label="Acoustic axes">
+        <span className="axis-pitch">Pitch</span>
+        <span className="axis-timbre">Timbre</span>
+        <span className="axis-spread">Spread</span>
+      </div>
       <div className="graph-hint">Drag to rotate, wheel to zoom</div>
       {tooltip && (
         <div className="tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
@@ -294,12 +306,52 @@ function D3CallSpaceGraph({ points }) {
   );
 }
 
+function TimelineControls({ timeline, rangeStart, rangeEnd, cursor, playing, onRangeStart, onRangeEnd, onCursor, onToggle }) {
+  const hasData = timeline.end > timeline.start;
+  const span = timeline.end - timeline.start;
+  const windowStart = timeline.start + span * (rangeStart / 100);
+  const windowEnd = timeline.start + span * (rangeEnd / 100);
+  const cursorTime = windowStart + (windowEnd - windowStart) * (cursor / 100);
+
+  return (
+    <section className="timeline-controls" aria-label="Detection timeline playback">
+      <div className="timeline-head">
+        <div>
+          <h3>Detection Playback</h3>
+          <p>{hasData ? `${fmtTime(windowStart)} to ${fmtTime(windowEnd)}` : "Waiting for timestamped detections"}</p>
+        </div>
+        <button type="button" className="command-button" onClick={onToggle} disabled={!hasData}>
+          {playing ? "Pause" : "Play"}
+        </button>
+      </div>
+      <label className="range-control">
+        <span>Window start</span>
+        <input type="range" min="0" max="100" value={rangeStart} disabled={!hasData} onChange={(event) => onRangeStart(Math.min(Number(event.target.value), rangeEnd - 1))} />
+      </label>
+      <label className="range-control">
+        <span>Window end</span>
+        <input type="range" min="0" max="100" value={rangeEnd} disabled={!hasData} onChange={(event) => onRangeEnd(Math.max(Number(event.target.value), rangeStart + 1))} />
+      </label>
+      <label className="range-control playback-scrubber">
+        <span>Playback: {hasData ? fmtTime(cursorTime) : "-"}</span>
+        <input type="range" min="0" max="100" value={cursor} disabled={!hasData} onChange={(event) => onCursor(Number(event.target.value))} />
+      </label>
+    </section>
+  );
+}
+
 function App() {
   const [status, setStatus] = useState({});
   const [audio, setAudio] = useState({ count: 0, items: [] });
   const [processed, setProcessed] = useState({ count: 0, items: [] });
   const [space, setSpace] = useState({ count: 0, items: [] });
   const [error, setError] = useState("");
+  const [rangeStart, setRangeStart] = useState(0);
+  const [rangeEnd, setRangeEnd] = useState(100);
+  const [cursor, setCursor] = useState(100);
+  const [playing, setPlaying] = useState(false);
+  const [backfillMessage, setBackfillMessage] = useState("");
+  const [refreshToken, setRefreshToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -336,7 +388,37 @@ function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [refreshToken]);
+
+  const timeline = useMemo(() => {
+    const timestamps = (space.items || []).map((point) => Date.parse(point.timestamp)).filter(Number.isFinite);
+    if (!timestamps.length) {
+      return { start: 0, end: 0 };
+    }
+    return { start: Math.min(...timestamps), end: Math.max(...timestamps) };
+  }, [space.items]);
+
+  const activeUntil = timeline.start + (timeline.end - timeline.start) * (rangeStart + (rangeEnd - rangeStart) * (cursor / 100)) / 100;
+
+  useEffect(() => {
+    if (!playing || timeline.end <= timeline.start) {
+      return undefined;
+    }
+    const timer = setInterval(() => {
+      setCursor((value) => value >= 100 ? 0 : Math.min(100, value + 2));
+    }, 450);
+    return () => clearInterval(timer);
+  }, [playing, timeline]);
+
+  async function backfill() {
+    try {
+      const result = await postJson("/api/backfill");
+      setBackfillMessage(`Updated ${result.updated} historical detection${result.updated === 1 ? "" : "s"}`);
+      setRefreshToken((value) => value + 1);
+    } catch (err) {
+      setBackfillMessage(err.message || "Backfill could not run");
+    }
+  }
 
   const state = status.state || "unknown";
   const running = Boolean(status.analyzerRunning);
@@ -385,7 +467,24 @@ function App() {
         <section className="panel graph-panel">
           <h2>3D Bird Call Space</h2>
           <p className="sub">X: Dominant pitch, Y: Timbre centroid, Z: Tonal spread, Color: confidence, Radius: energy</p>
-          <D3CallSpaceGraph points={space.items || []} />
+          <D3CallSpaceGraph points={space.items || []} visibleUntil={activeUntil} />
+          <TimelineControls
+            timeline={timeline}
+            rangeStart={rangeStart}
+            rangeEnd={rangeEnd}
+            cursor={cursor}
+            playing={playing}
+            onRangeStart={setRangeStart}
+            onRangeEnd={setRangeEnd}
+            onCursor={setCursor}
+            onToggle={() => setPlaying((value) => !value)}
+          />
+          <div className="metric-guide">
+            <div><strong>Pitch</strong><span>Dominant frequency of the sound. Higher values are generally higher-pitched calls.</span></div>
+            <div><strong>Timbre</strong><span>Spectral centroid: where the sound's energy sits across frequencies. Higher values tend to sound brighter.</span></div>
+            <div><strong>Spread</strong><span>Spectral bandwidth: how broadly the sound energy is distributed. Higher values indicate a less tonal sound.</span></div>
+            <div><strong>Energy</strong><span>RMS loudness controls point radius; BirdNET confidence controls the point color.</span></div>
+          </div>
         </section>
 
         <section className="panel table-panel">
@@ -398,12 +497,16 @@ function App() {
                 <td>
                   <Pill status={item.status || "recorded"} />
                 </td>
-                <td>{fmt(item.top_prediction)}</td>
-                <td>{fmtNumber(item.top_confidence, 3)}</td>
+                <td>{fmt(item.display_species || item.top_prediction)}</td>
+                <td>{fmtNumber(item.top_confidence || item.display_confidence, 3)}</td>
                 <td title={fmt(item.file_path)}>{fmt(item.file_path)}</td>
               </tr>
             ))}
           />
+          <div className="backfill-row">
+            <p>{backfillMessage || "Fill in family, conservation status, regions, and images for historical detections when online enrichment is enabled."}</p>
+            <button type="button" className="command-button" onClick={backfill}>Backfill Bird Details</button>
+          </div>
         </section>
 
         <section className="panel table-panel">

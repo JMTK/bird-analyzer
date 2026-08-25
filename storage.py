@@ -52,6 +52,18 @@ class Storage:
   def index_metadata(self, document: dict) -> None:
     raise NotImplementedError
 
+  def update_metadata(self, doc_id: str, fields: dict) -> None:
+    raise NotImplementedError
+
+  def get_enrichment_cache(self, cache_key: str) -> dict | None:
+    raise NotImplementedError
+
+  def set_enrichment_cache(self, cache_key: str, document: dict) -> None:
+    raise NotImplementedError
+
+  def reserve_enrichment_request(self, hourly_limit: int) -> bool:
+    raise NotImplementedError
+
   def fetch_audio(self, size: int = 250) -> list[dict]:
     raise NotImplementedError
 
@@ -104,6 +116,21 @@ class ElasticsearchStorage(Storage):
       self.client.index(index=self.metadata_index, document=document)
     except Exception as exc:
       print(f"Failed indexing to {self.metadata_index}: {exc}")
+
+  def update_metadata(self, doc_id: str, fields: dict) -> None:
+    try:
+      self.client.update(index=self.metadata_index, id=doc_id, doc=fields)
+    except Exception as exc:
+      print(f"Failed update to {self.metadata_index}/{doc_id}: {exc}")
+
+  def get_enrichment_cache(self, cache_key: str) -> dict | None:
+    return None
+
+  def set_enrichment_cache(self, cache_key: str, document: dict) -> None:
+    return None
+
+  def reserve_enrichment_request(self, hourly_limit: int) -> bool:
+    return True
 
   def fetch_audio(self, size: int = 250) -> list[dict]:
     return self._fetch(self.audio_index, size)
@@ -170,8 +197,26 @@ class SqliteStorage(Storage):
         )
         """
       )
+      self._conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enrichment_cache (
+          cache_key TEXT PRIMARY KEY,
+          updated_at TEXT NOT NULL,
+          document TEXT NOT NULL
+        )
+        """
+      )
+      self._conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enrichment_requests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          requested_at TEXT NOT NULL
+        )
+        """
+      )
       self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_timestamp ON audio(timestamp)")
       self._conn.execute("CREATE INDEX IF NOT EXISTS idx_metadata_timestamp ON metadata(timestamp)")
+      self._conn.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_requests_timestamp ON enrichment_requests(requested_at)")
       self._conn.commit()
 
   def index_audio(self, document: dict, doc_id: str) -> None:
@@ -216,6 +261,67 @@ class SqliteStorage(Storage):
         self._conn.commit()
     except Exception as exc:
       print(f"Failed indexing metadata record: {exc}")
+
+  def update_metadata(self, doc_id: str, fields: dict) -> None:
+    try:
+      with self._lock:
+        row = self._conn.execute(
+          "SELECT document FROM metadata WHERE id = ?", (doc_id,)
+        ).fetchone()
+        if row is None:
+          return
+        existing = json.loads(row[0])
+        existing.update(fields)
+        timestamp = _stringify_timestamp(existing.get("timestamp"))
+        self._conn.execute(
+          "UPDATE metadata SET timestamp = ?, document = ? WHERE id = ?",
+          (timestamp, _dumps(existing), doc_id),
+        )
+        self._conn.commit()
+    except Exception as exc:
+      print(f"Failed update to metadata/{doc_id}: {exc}")
+
+  def get_enrichment_cache(self, cache_key: str) -> dict | None:
+    try:
+      with self._lock:
+        row = self._conn.execute(
+          "SELECT document FROM enrichment_cache WHERE cache_key = ?", (cache_key,)
+        ).fetchone()
+      return json.loads(row[0]) if row else None
+    except Exception as exc:
+      print(f"Failed reading enrichment cache for {cache_key}: {exc}")
+      return None
+
+  def set_enrichment_cache(self, cache_key: str, document: dict) -> None:
+    try:
+      with self._lock:
+        self._conn.execute(
+          "INSERT INTO enrichment_cache (cache_key, updated_at, document) VALUES (?, ?, ?) "
+          "ON CONFLICT(cache_key) DO UPDATE SET updated_at=excluded.updated_at, document=excluded.document",
+          (cache_key, datetime.datetime.now(datetime.timezone.utc).isoformat(), _dumps(document)),
+        )
+        self._conn.commit()
+    except Exception as exc:
+      print(f"Failed writing enrichment cache for {cache_key}: {exc}")
+
+  def reserve_enrichment_request(self, hourly_limit: int) -> bool:
+    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).isoformat()
+    requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+      with self._lock:
+        recent_count = self._conn.execute(
+          "SELECT COUNT(*) FROM enrichment_requests WHERE requested_at >= ?", (cutoff,)
+        ).fetchone()[0]
+        if recent_count >= hourly_limit:
+          return False
+        self._conn.execute(
+          "INSERT INTO enrichment_requests (requested_at) VALUES (?)", (requested_at,)
+        )
+        self._conn.commit()
+      return True
+    except Exception as exc:
+      print(f"Failed reserving enrichment request: {exc}")
+      return False
 
   def fetch_audio(self, size: int = 250) -> list[dict]:
     return self._fetch("audio", size)
@@ -295,6 +401,19 @@ class ResilientStorage(Storage):
   def index_metadata(self, document: dict) -> None:
     self._fallback.index_metadata(document)
     self._mirror("index_metadata", document)
+
+  def update_metadata(self, doc_id: str, fields: dict) -> None:
+    self._fallback.update_metadata(doc_id, fields)
+    self._mirror("update_metadata", doc_id, fields)
+
+  def get_enrichment_cache(self, cache_key: str) -> dict | None:
+    return self._fallback.get_enrichment_cache(cache_key)
+
+  def set_enrichment_cache(self, cache_key: str, document: dict) -> None:
+    self._fallback.set_enrichment_cache(cache_key, document)
+
+  def reserve_enrichment_request(self, hourly_limit: int) -> bool:
+    return self._fallback.reserve_enrichment_request(hourly_limit)
 
   def fetch_audio(self, size: int = 250) -> list[dict]:
     return self._fallback.fetch_audio(size)

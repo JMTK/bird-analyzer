@@ -54,6 +54,7 @@ def load_runtime_config() -> dict:
         "offline_mode": getattr(module, "offline_mode", True),
         "allow_model_downloads": getattr(module, "allow_model_downloads", False),
         "enable_online_enrichment": getattr(module, "enable_online_enrichment", False),
+        "nuthatch_hourly_limit": getattr(module, "nuthatch_hourly_limit", 500),
         "location_latitude": getattr(module, "location_latitude"),
         "location_longitude": getattr(module, "location_longitude"),
       }
@@ -359,7 +360,7 @@ def process_recording(
       cache_key = f"{scientific_name}|{regular_name}"
       cached_metadata = species_metadata_cache.get(cache_key)
       if cached_metadata is None:
-        cached_metadata = {
+        cached_metadata = storage.get_enrichment_cache(cache_key) or {
           "name": regular_name,
           "sciName": scientific_name,
           "images": [],
@@ -369,8 +370,14 @@ def process_recording(
           "status": "",
         }
         cache_metadata = True
-        if CONFIG["enable_online_enrichment"] and CONFIG["api_key"]:
+        if (
+          not storage.get_enrichment_cache(cache_key)
+          and CONFIG["enable_online_enrichment"]
+          and CONFIG["api_key"]
+        ):
           try:
+            if not storage.reserve_enrichment_request(CONFIG["nuthatch_hourly_limit"]):
+              raise requests.RequestException("Nuthatch hourly request limit reached")
             url = (
               "https://nuthatch.lastelm.software/v2/birds?page=1&pageSize=25"
               f"&name={regular_name}&sciName={scientific_name}&operator=OR"
@@ -382,6 +389,7 @@ def process_recording(
             bird_response = Response.from_dict(api_response.json())
             if bird_response.entities:
               cached_metadata = bird_response.entities[0].__dict__.copy()
+              storage.set_enrichment_cache(cache_key, cached_metadata)
           except (requests.RequestException, ValueError, TypeError) as exc:
             print(f"Metadata enrichment unavailable for '{regular_name}': {exc}")
             # Keep local metadata for this detection, but retry enrichment after
