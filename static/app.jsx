@@ -87,6 +87,15 @@ function projectPoint(point, rotation, projection) {
   };
 }
 
+function createSoftScale(values) {
+  const median = d3.median(values) ?? 0;
+  const deviations = values.map((value) => Math.abs(value - median));
+  const medianAbsoluteDeviation = d3.median(deviations) || 1;
+  const spread = Math.max(medianAbsoluteDeviation * 4, 1);
+
+  return (value) => Math.tanh((value - median) / spread) * 0.76;
+}
+
 function D3CallSpaceGraph({ points, visibleFrom, visibleUntil }) {
   const svgRef = useRef(null);
   const wrapperRef = useRef(null);
@@ -103,13 +112,9 @@ function D3CallSpaceGraph({ points, visibleFrom, visibleUntil }) {
   );
 
   const normalized = useMemo(() => {
-    const xExtent = d3.extent(points, (p) => Number(p.x_pitch_hz || 0));
-    const yExtent = d3.extent(points, (p) => Number(p.y_timbre_centroid_hz || 0));
-    const zExtent = d3.extent(points, (p) => Number(p.z_tonal_spread_hz || 0));
-
-    const xScale = d3.scaleLinear().domain(xExtent[0] === xExtent[1] ? [0, xExtent[1] || 1] : xExtent).range([-0.72, 0.72]);
-    const yScale = d3.scaleLinear().domain(yExtent[0] === yExtent[1] ? [0, yExtent[1] || 1] : yExtent).range([-0.72, 0.72]);
-    const zScale = d3.scaleLinear().domain(zExtent[0] === zExtent[1] ? [0, zExtent[1] || 1] : zExtent).range([-0.72, 0.72]);
+    const xScale = createSoftScale(points.map((p) => Number(p.x_pitch_hz || 0)));
+    const yScale = createSoftScale(points.map((p) => Number(p.y_timbre_centroid_hz || 0)));
+    const zScale = createSoftScale(points.map((p) => Number(p.z_tonal_spread_hz || 0)));
 
     return visiblePoints.map((p) => ({
       raw: p,
