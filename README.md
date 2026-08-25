@@ -53,6 +53,8 @@ Settings are loaded from `config.py` (or `config.example.py` as fallback). Requi
 *   `cert_loc`: path to Elasticsearch CA certificate
 *   `api_key`: API key for bird enrichment service (nuthatch.lastelm.software)
 *   `webhook_url`: Discord webhook URL for notifications (optional)
+*   `offline_mode`: defaults to `True`; disables remote Geo model loading and avoids BirdNET downloads when the acoustic model is not cached locally
+*   `enable_online_enrichment`: defaults to `False`; set to `True` with an `api_key` to request optional Nuthatch metadata
 *   `audio_device_override`: specific audio device index or name (optional; defaults to first available input device)
 *   `location_latitude` / `location_longitude`: geographic coordinates for species predictions
 
@@ -68,6 +70,21 @@ Key Features
 *   Discord notifications for high-confidence detections
 *   Archive storage for significant audio clips
 *   Web UI with 3D acoustic visualization
+
+Offline Use
+-----------
+
+The analyzer stores its data in SQLite by default and records predictions without
+network access. When Elasticsearch is configured, every write is also retained
+in local SQLite and mirrored to Elasticsearch whenever it is reachable, so an
+intermittent connection does not lose events. Optional metadata enrichment uses
+local species information during an outage and retries on a later detection.
+
+Before disconnecting a device, install the Python dependencies and run the
+analyzer once while connected so BirdNET can download its acoustic model. The
+downloaded model remains in BirdNET's local app-data cache. If that model is
+absent while `offline_mode` is enabled, recordings are retained with an
+`awaiting_acoustic_model` status instead of being deleted.
 
 Audio Device Setup
 ------------------

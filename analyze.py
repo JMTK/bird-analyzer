@@ -22,9 +22,10 @@ import numpy as np
 import requests
 import sounddevice as sd
 import soundfile as sf
+from birdnet.acoustic.models.v3_0.onnx import AcousticOnnxDownloaderV3_0
 
 from bird import Bird, Response
-from storage import Storage, create_storage
+from storage import Storage, create_available_storage
 
 
 def load_runtime_config() -> dict:
@@ -46,6 +47,11 @@ def load_runtime_config() -> dict:
         "api_key": getattr(module, "api_key", ""),
         "webhook_url": getattr(module, "webhook_url", ""),
         "audio_device_override": getattr(module, "audio_device_override", None),
+        "default_confidence_threshold": getattr(module, "default_confidence_threshold", 0.1),
+        "prediction_workers": getattr(module, "prediction_workers", 1),
+        "prediction_batch_size": getattr(module, "prediction_batch_size", 1),
+        "offline_mode": getattr(module, "offline_mode", True),
+        "enable_online_enrichment": getattr(module, "enable_online_enrichment", False),
         "location_latitude": getattr(module, "location_latitude"),
         "location_longitude": getattr(module, "location_longitude"),
       }
@@ -54,15 +60,24 @@ def load_runtime_config() -> dict:
 
 CONFIG = load_runtime_config()
 
+
+def acoustic_model_is_available_offline() -> bool:
+  return AcousticOnnxDownloaderV3_0._check_acoustic_model_available("fp32")
+
+
 # Load birdnet models
 print("Pre-loading birdnet models...")
 try:
-  ACOUSTIC_MODEL = birdnet.load("acoustic", "3.0", "onnx")  # type: ignore
+  if CONFIG["offline_mode"] and not acoustic_model_is_available_offline():
+    print("Acoustic model is not cached; predictions will wait until it is installed locally")
+    ACOUSTIC_MODEL = None
+  else:
+    ACOUSTIC_MODEL = birdnet.load("acoustic", "3.0", "onnx")  # type: ignore
 except Exception:
   ACOUSTIC_MODEL = None
 
 try:
-  GEO_MODEL = birdnet.load("geo", "3.0", "onnx")  # type: ignore
+  GEO_MODEL = None if CONFIG["offline_mode"] else birdnet.load("geo", "3.0", "onnx")  # type: ignore
 except Exception:
   GEO_MODEL = None
 
@@ -274,18 +289,30 @@ def process_recording(
   print(f"Processing recording {recording_id}")
   features = compute_audio_features(file_path)
 
+  if ACOUSTIC_MODEL is None:
+    storage.update_audio(
+      recording_id,
+      {
+        "status": "awaiting_acoustic_model",
+        "error": "BirdNET acoustic model is not available locally",
+        "processed_at": datetime.datetime.now(datetime.timezone.utc),
+      },
+    )
+    print("Prediction skipped: BirdNET acoustic model is unavailable")
+    return
+
   # Use the new birdnet 1.1.0 API
   try:
     # Single worker/batch to cap peak memory; birdnet otherwise spawns one worker
     # per CPU core (each holding a full model copy), which OOM-kills on low-memory devices.
     predictions_result = ACOUSTIC_MODEL.predict(  # type: ignore
       str(file_path),
-      default_confidence_threshold=0.1,
-      n_workers=1,
-      batch_size=1,
+      default_confidence_threshold=CONFIG["default_confidence_threshold"],
+      n_workers=CONFIG["prediction_workers"],
+      batch_size=CONFIG["prediction_batch_size"],
     )
     prediction_list = [
-      (str(row["species"]), float(row["confidence"]))
+      (str(row["species_name"]), float(row["confidence"]))
       for row in predictions_result.to_structured_array()
     ]
   except Exception as e:
@@ -317,27 +344,36 @@ def process_recording(
       cache_key = f"{scientific_name}|{regular_name}"
       cached_metadata = species_metadata_cache.get(cache_key)
       if cached_metadata is None:
-        url = (
-          "https://nuthatch.lastelm.software/v2/birds?page=1&pageSize=25"
-          f"&name={regular_name}&sciName={scientific_name}&operator=OR"
-        )
-        api_response = HTTP_SESSION.get(url, headers={"API-Key": CONFIG["api_key"]}, timeout=10)
-        response_dict = api_response.json()
-        bird_response = Response.from_dict(response_dict)
-        if bird_response.entities:
-          bird = bird_response.entities[0]
-          cached_metadata = bird.__dict__.copy()
-        else:
-          cached_metadata = {
-            "name": regular_name,
-            "sciName": scientific_name,
-            "images": [],
-            "region": [],
-            "family": "",
-            "order": "",
-            "status": "",
-          }
-        species_metadata_cache[cache_key] = cached_metadata
+        cached_metadata = {
+          "name": regular_name,
+          "sciName": scientific_name,
+          "images": [],
+          "region": [],
+          "family": "",
+          "order": "",
+          "status": "",
+        }
+        cache_metadata = True
+        if CONFIG["enable_online_enrichment"] and CONFIG["api_key"]:
+          try:
+            url = (
+              "https://nuthatch.lastelm.software/v2/birds?page=1&pageSize=25"
+              f"&name={regular_name}&sciName={scientific_name}&operator=OR"
+            )
+            api_response = HTTP_SESSION.get(
+              url, headers={"API-Key": CONFIG["api_key"]}, timeout=3
+            )
+            api_response.raise_for_status()
+            bird_response = Response.from_dict(api_response.json())
+            if bird_response.entities:
+              cached_metadata = bird_response.entities[0].__dict__.copy()
+          except (requests.RequestException, ValueError, TypeError) as exc:
+            print(f"Metadata enrichment unavailable for '{regular_name}': {exc}")
+            # Keep local metadata for this detection, but retry enrichment after
+            # a transient connectivity failure on a future detection.
+            cache_metadata = False
+        if cache_metadata:
+          species_metadata_cache[cache_key] = cached_metadata
 
       metadata_doc = cached_metadata.copy()
       metadata_doc.update(
@@ -418,22 +454,9 @@ def main() -> None:
   RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
   ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
 
-  backend_name = CONFIG.get("storage_backend", "elasticsearch")
-  print(f"Initializing {backend_name} storage...")
-  storage = create_storage(CONFIG)
-  storage_available = storage.ping()
-  if storage_available:
-    print(f"{backend_name} storage initialized!")
-  else:
-    print(f"{backend_name} storage is not available")
-
-  if storage_available:
-    try:
-      storage.setup()
-    except Exception as exc:
-      print("Storage setup failed: " + str(exc))
-  else:
-    print("Running without storage; indexing will retry when connection returns")
+  print(f"Initializing {CONFIG.get('storage_backend', 'sqlite')} storage...")
+  storage = create_available_storage(CONFIG)
+  print("Storage initialized!")
 
   print("Initializing birdnet...")
   configure_audio_input()

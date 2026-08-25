@@ -5,7 +5,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template
 
-from storage import create_storage
+from storage import create_available_storage
 
 STATUS_PATH = Path("runtime") / "status.json"
 HEARTBEAT_TIMEOUT_SECONDS = 12
@@ -33,7 +33,7 @@ def load_runtime_config() -> dict:
 
 
 CONFIG = load_runtime_config()
-storage = create_storage(CONFIG)
+storage = create_available_storage(CONFIG)
 
 
 def parse_timestamp(value: str | None) -> datetime.datetime | None:

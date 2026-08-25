@@ -6,9 +6,14 @@ audio_device_override = None
 
 webhook_url = ""
 
+# Run without external services. BirdNET models must be downloaded or copied to
+# the device before enabling this mode.
+offline_mode = False
+enable_online_enrichment = True
+
 # Storage backend for recordings/predictions: "elasticsearch" or "sqlite".
 # sqlite is a good fit for low-power devices like a Raspberry Pi since it needs no external service.
-storage_backend = "elasticsearch"
+storage_backend = "sqlite"
 sqlite_path = os.path.join(os.getcwd(), "runtime", "bird-analyzer.db")
 
 elasticsearch_host = "https://localhost:9200"
@@ -17,6 +22,12 @@ elasticsearch_password = ""
 cert_loc = os.path.join(os.getcwd(), "http_ca.crt")
 
 api_key=""
+
+# BirdNET acoustic prediction settings. Keep workers and batch size low on
+# low-memory devices such as a Raspberry Pi.
+default_confidence_threshold = 0.1
+prediction_workers = 1
+prediction_batch_size = 1
 
 # Latitude and longitude for bird species prediction
 location_latitude = 39.731782

@@ -69,6 +69,7 @@ class ElasticsearchStorage(Storage):
       http_auth=(user, password),
       max_retries=0,
       retry_on_timeout=False,
+      request_timeout=1,
     )
     self.audio_index = audio_index
     self.metadata_index = metadata_index
@@ -256,3 +257,70 @@ def create_storage(config: dict) -> Storage:
     config.get("audio_index_name", "bird-audio"),
     config.get("metadata_index_name", "bird-analyzer"),
   )
+
+
+class ResilientStorage(Storage):
+  """Writes locally first and mirrors to an optional remote backend when available."""
+
+  def __init__(self, fallback: SqliteStorage, primary: Storage | None = None):
+    self._fallback = fallback
+    self._primary = primary
+
+  def _primary_is_available(self) -> bool:
+    return self._primary is not None and self._primary.ping()
+
+  def _mirror(self, method_name: str, *args, **kwargs) -> None:
+    if not self._primary_is_available():
+      return
+    try:
+      getattr(self._primary, method_name)(*args, **kwargs)
+    except Exception as exc:
+      print(f"Failed mirroring to configured storage: {exc}")
+
+  def ping(self) -> bool:
+    return self._fallback.ping()
+
+  def setup(self) -> None:
+    self._fallback.setup()
+    self._mirror("setup")
+
+  def index_audio(self, document: dict, doc_id: str) -> None:
+    self._fallback.index_audio(document, doc_id)
+    self._mirror("index_audio", document, doc_id)
+
+  def update_audio(self, doc_id: str, fields: dict) -> None:
+    self._fallback.update_audio(doc_id, fields)
+    self._mirror("update_audio", doc_id, fields)
+
+  def index_metadata(self, document: dict) -> None:
+    self._fallback.index_metadata(document)
+    self._mirror("index_metadata", document)
+
+  def fetch_audio(self, size: int = 250) -> list[dict]:
+    return self._fallback.fetch_audio(size)
+
+  def fetch_metadata(self, size: int = 250) -> list[dict]:
+    return self._fallback.fetch_metadata(size)
+
+
+def create_available_storage(config: dict) -> Storage:
+  """Return storage that continues operating through remote-backend outages."""
+  backend = str(config.get("storage_backend", "elasticsearch")).strip().lower()
+  if backend == "sqlite":
+    storage = SqliteStorage(config.get("sqlite_path", "runtime/bird-analyzer.db"))
+    storage.setup()
+    return storage
+
+  fallback = SqliteStorage(config.get("sqlite_path", "runtime/bird-analyzer.db"))
+  fallback.setup()
+  try:
+    primary = create_storage(config)
+    if not primary.ping():
+      print("Configured storage is unavailable; continuing with local SQLite storage")
+    else:
+      primary.setup()
+  except Exception as exc:
+    print(f"Failed to initialize configured storage ({exc}); continuing with local SQLite storage")
+    primary = None
+
+  return ResilientStorage(fallback, primary)
