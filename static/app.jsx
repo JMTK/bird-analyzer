@@ -107,11 +107,11 @@ function D3CallSpaceGraph({ points, visibleFrom, visibleUntil }) {
     const yExtent = d3.extent(points, (p) => Number(p.y_timbre_centroid_hz || 0));
     const zExtent = d3.extent(points, (p) => Number(p.z_tonal_spread_hz || 0));
 
-    const xScale = d3.scaleLinear().domain(xExtent[0] === xExtent[1] ? [0, xExtent[1] || 1] : xExtent).range([-1, 1]);
-    const yScale = d3.scaleLinear().domain(yExtent[0] === yExtent[1] ? [0, yExtent[1] || 1] : yExtent).range([-1, 1]);
-    const zScale = d3.scaleLinear().domain(zExtent[0] === zExtent[1] ? [0, zExtent[1] || 1] : zExtent).range([-1, 1]);
+    const xScale = d3.scaleLinear().domain(xExtent[0] === xExtent[1] ? [0, xExtent[1] || 1] : xExtent).range([-0.72, 0.72]);
+    const yScale = d3.scaleLinear().domain(yExtent[0] === yExtent[1] ? [0, yExtent[1] || 1] : yExtent).range([-0.72, 0.72]);
+    const zScale = d3.scaleLinear().domain(zExtent[0] === zExtent[1] ? [0, zExtent[1] || 1] : zExtent).range([-0.72, 0.72]);
 
-    return points.map((p) => ({
+    return visiblePoints.map((p) => ({
       raw: p,
       x: xScale(Number(p.x_pitch_hz || 0)),
       y: yScale(Number(p.y_timbre_centroid_hz || 0)),
@@ -575,10 +575,13 @@ function App() {
         <section className="panel table-panel">
           <div className="panel-heading">
             <h2>Recorded Audio Index</h2>
-            <label className="filter-toggle">
-              <input type="checkbox" checked={processedOnly} onChange={(event) => setProcessedOnly(event.target.checked)} />
-              <span>Processed only</span>
-            </label>
+            <div className="table-filter-status">
+              <span className="filter-summary">{visibleAudio.length} matching</span>
+              <label className="filter-toggle">
+                <input type="checkbox" checked={processedOnly} onChange={(event) => setProcessedOnly(event.target.checked)} />
+                <span>Processed only</span>
+              </label>
+            </div>
           </div>
           <DataTable
             headers={["Time", "Status", "Top Species", "Confidence", "Audio"]}
@@ -605,7 +608,10 @@ function App() {
         </section>
 
         <section className="panel table-panel">
-          <h2>Processed Metadata Index</h2>
+          <div className="panel-heading">
+            <h2>Processed Metadata Index</h2>
+            <span className="filter-summary">{filteredProcessed.length} matching</span>
+          </div>
           <DataTable
             headers={["Time", "Name", "Scientific", "Confidence", "Family"]}
             rows={filteredProcessed.slice(0, 200).map((item, idx) => (

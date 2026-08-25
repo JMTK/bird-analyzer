@@ -162,6 +162,12 @@ h2 {
   accent-color: var(--accent-2);
 }
 
+.table-filter-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
 .filter-summary {
   color: var(--ink-muted);
   font-family: "IBM Plex Mono", monospace;
