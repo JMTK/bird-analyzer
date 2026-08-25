@@ -262,15 +262,14 @@ def process_recording(
   # Use the new birdnet 1.1.0 API
   try:
     # Predict species from audio
-    predictions_result = ACOUSTIC_MODEL.predict(str(file_path), min_confidence=0.1)  # type: ignore
-    
-    # Convert predictions to a list of tuples (species_name, confidence, start_time, end_time)
-    prediction_list = []
-    for row in predictions_result:
-      # The predictions result has columns: start_time, end_time, species, confidence
-      species_name = row.get("species", "") if hasattr(row, "get") else str(row[2])
-      confidence = float(row.get("confidence", 0)) if hasattr(row, "get") else float(row[3])
-      prediction_list.append((species_name, confidence))
+    predictions_result = ACOUSTIC_MODEL.predict(  # type: ignore
+      str(file_path),
+      default_confidence_threshold=0.1,
+    )
+    prediction_list = [
+      (str(row["species"]), float(row["confidence"]))
+      for row in predictions_result.to_structured_array()
+    ]
   except Exception as e:
     print(f"Prediction error: {e}")
     prediction_list = []
@@ -359,6 +358,13 @@ def process_recording(
     },
   )
 
+  if not prediction_list:
+    try:
+      file_path.unlink()
+      print(f"Deleted recording with no predictions: {file_path}")
+    except OSError as exc:
+      print(f"Failed to delete recording with no predictions: {exc}")
+
 
 def processor_loop(es: elasticsearch.Elasticsearch, species_in_area: dict | None) -> None:
   print("Processor thread started")
@@ -420,7 +426,12 @@ def main() -> None:
 
   print("Initializing birdnet...")
   configure_audio_input()
-  
+
+  print(
+    "Using location: "
+    f"{CONFIG['location_latitude']}, {CONFIG['location_longitude']}"
+  )
+
   # Get species at location using geo model
   species_in_area = None
   if GEO_MODEL is not None:
@@ -437,11 +448,10 @@ def main() -> None:
       )
       
       # Convert to dict of species names and their probabilities
-      species_in_area = {}
-      for row in geo_predictions:
-        species_name = row.get("species", "") if hasattr(row, "get") else str(row[0])
-        probability = float(row.get("confidence", 0)) if hasattr(row, "get") else float(row[1])
-        species_in_area[species_name] = probability
+      species_in_area = {
+        str(species_name): float(probability)
+        for species_name, probability in zip(geo_predictions.species_list, geo_predictions.species_probs)
+      }
       
       print("Found " + str(len(species_in_area)) + " species in your area")
     except Exception as e:
