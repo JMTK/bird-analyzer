@@ -451,7 +451,7 @@ def main() -> None:
     else:
       print(f"Elasticsearch is not available: {es.info()}")
   except Exception:
-    print("Elasticsearch failed to initialize!")
+    print(f"Elasticsearch failed to initialize! {es.info()}")
 
   if es_available:
     try:
