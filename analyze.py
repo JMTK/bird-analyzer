@@ -75,6 +75,7 @@ TEST_FILE = Path("test.wav")
 is_test = TEST_FILE.exists()
 stop_event = threading.Event()
 recordings_queue: Queue[dict] = Queue(maxsize=40)
+selected_input_device: int | str | None = None
 
 
 def utc_now_iso() -> str:
@@ -187,6 +188,11 @@ def recording_loop(es: elasticsearch.Elasticsearch) -> None:
         shutil.copy(TEST_FILE, output_file)
         sleep(1)
       else:
+        if not configure_audio_input():
+          print("No compatible input audio device found; waiting for a microphone")
+          write_status("running", {"last_error": "No compatible input audio device"})
+          sleep(2)
+          continue
         print(f"Recording for {DURATION_SECONDS} seconds")
         frame_count = int(SAMPLE_RATE * DURATION_SECONDS)
         mydata = sd.rec(frame_count, samplerate=SAMPLE_RATE, channels=1, blocking=True)
@@ -210,27 +216,36 @@ def recording_loop(es: elasticsearch.Elasticsearch) -> None:
       sleep(1)
 
 
-def configure_audio_input() -> None:
+def configure_audio_input() -> bool:
+  global selected_input_device
+
   configured_device = CONFIG.get("audio_device_override")
   if configured_device is not None and configured_device != "":
     try:
+      sd.check_input_settings(device=configured_device, samplerate=SAMPLE_RATE, channels=1)
       sd.default.device = configured_device  # type: ignore
-      print(f"Using configured audio input device: {configured_device}")
+      if selected_input_device != configured_device:
+        print(f"Using configured audio input device: {configured_device}")
+        selected_input_device = configured_device
+      return True
     except Exception as e:
-      print(f"Failed to set audio device: {e}")
-    return
+      print(f"Configured audio device is unavailable: {e}")
 
   devices = sd.query_devices()
   for index, device in enumerate(devices):
     if int(device.get("max_input_channels", 0)) > 0:
       try:
+        sd.check_input_settings(device=index, samplerate=SAMPLE_RATE, channels=1)
         sd.default.device = index  # type: ignore
+        if selected_input_device != index:
+          print(f"Auto-selected audio input device [{index}]: {device.get('name', 'unknown')}")
+          selected_input_device = index
+        return True
       except Exception:
-        pass
-      print(f"Auto-selected audio input device [{index}]: {device.get('name', 'unknown')}")
-      return
+        continue
 
-  print("No input audio device found; recorder may fail until a microphone is available")
+  selected_input_device = None
+  return False
 
 
 def process_recording(
