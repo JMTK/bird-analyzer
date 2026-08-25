@@ -47,6 +47,23 @@ def load_runtime_config() -> dict:
 
 CONFIG = load_runtime_config()
 
+# Load birdnet models
+print("Pre-loading birdnet models...")
+try:
+  ACOUSTIC_MODEL = birdnet.load("acoustic", "2.4", "tf")  # type: ignore
+except Exception:
+  # Fallback to onnx if tf backend not available
+  ACOUSTIC_MODEL = birdnet.load("acoustic", "3.0", "onnx")  # type: ignore
+
+try:
+  GEO_MODEL = birdnet.load("geo", "2.4", "tf")  # type: ignore
+except Exception:
+  # Fallback if tf backend not available
+  try:
+    GEO_MODEL = birdnet.load("geo", "3.0", "onnx")  # type: ignore
+  except Exception:
+    GEO_MODEL = None
+
 warnings.filterwarnings("ignore")
 absl.logging.set_verbosity(absl.logging.ERROR)
 
@@ -232,22 +249,20 @@ def process_recording(
   print(f"Processing recording {recording_id}")
   features = compute_audio_features(file_path)
 
-  # Note: birdnet 0.2.15+ has a different API than 0.1.6
-  # For now, we skip species filtering and get all predictions
-  # You can restore filtering by implementing the new birdnet.AcousticPredictionSession API
+  # Use the new birdnet 1.1.0 API
   try:
-    predictions = birdnet.SpeciesPredictions(  # type: ignore
-      birdnet.predict_species_within_audio_file(  # type: ignore
-        file_path,
-        species_filter=set(species_in_area.keys()) if species_in_area else None,
-        min_confidence=0.1,
-        silent=True,
-      )
-    )
-    prediction_list = list(predictions[(0.0, DURATION_SECONDS)].items())
-  except (AttributeError, TypeError):
-    # Fallback for newer birdnet API - predict without species filter
-    print("Warning: Using fallback prediction method (full species detection)")
+    # Predict species from audio
+    predictions_result = ACOUSTIC_MODEL.predict(str(file_path), min_confidence=0.1)  # type: ignore
+    
+    # Convert predictions to a list of tuples (species_name, confidence, start_time, end_time)
+    prediction_list = []
+    for row in predictions_result:
+      # The predictions result has columns: start_time, end_time, species, confidence
+      species_name = row.get("species", "") if hasattr(row, "get") else str(row[2])
+      confidence = float(row.get("confidence", 0)) if hasattr(row, "get") else float(row[3])
+      prediction_list.append((species_name, confidence))
+  except Exception as e:
+    print(f"Prediction error: {e}")
     prediction_list = []
   
   print("Found " + str(len(prediction_list)) + " predictions")
@@ -255,8 +270,16 @@ def process_recording(
   top_name = ""
   top_confidence = 0.0
 
-  for names, confidence in prediction_list:
-    scientific_name, regular_name = names.split("_")
+  for species_name, confidence in prediction_list:
+    # Species name format is "scientific_name_regular_name"
+    if "_" in species_name:
+      parts = species_name.rsplit("_", 1)
+      scientific_name = parts[0]
+      regular_name = parts[1]
+    else:
+      scientific_name = species_name
+      regular_name = species_name
+    
     if confidence > top_confidence:
       top_confidence = confidence
       top_name = regular_name
@@ -388,19 +411,34 @@ def main() -> None:
   print("Initializing birdnet...")
   configure_audio_input()
   
-  # Try to get species at location using new API
-  # Note: birdnet 0.2.15+ has a different API than 0.1.6
+  # Get species at location using geo model
   species_in_area = None
-  try:
-    species_in_area = birdnet.predict_species_at_location_and_time(  # type: ignore
-      CONFIG["location_latitude"],
-      CONFIG["location_longitude"]
-    )
-    print("Found " + str(len(species_in_area)) + " species in your area")
-  except (AttributeError, TypeError) as e:
-    print(f"Warning: Could not filter species by location ({e})")
-    print("Proceeding without geographical filtering - all species will be detected")
-    species_in_area = None
+  if GEO_MODEL is not None:
+    try:
+      # Get current week of year (1-48)
+      current_date = datetime.datetime.now(datetime.timezone.utc)
+      week = (current_date.timetuple().tm_yday - 1) // 7 + 1
+      
+      # Predict species for location and time
+      geo_predictions = GEO_MODEL.predict(  # type: ignore
+        CONFIG["location_latitude"],
+        CONFIG["location_longitude"],
+        week=week
+      )
+      
+      # Convert to dict of species names and their probabilities
+      species_in_area = {}
+      for row in geo_predictions:
+        species_name = row.get("species", "") if hasattr(row, "get") else str(row[0])
+        probability = float(row.get("confidence", 0)) if hasattr(row, "get") else float(row[1])
+        species_in_area[species_name] = probability
+      
+      print("Found " + str(len(species_in_area)) + " species in your area")
+    except Exception as e:
+      print(f"Warning: Could not get species by location ({e})")
+      species_in_area = None
+  else:
+    print("Warning: Geo model not available, proceeding without geographical filtering")
   
   write_status("running", {"species_count": len(species_in_area) if species_in_area else 0})
 
