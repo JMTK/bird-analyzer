@@ -83,7 +83,7 @@ function projectPoint(point, rotation, projection) {
   };
 }
 
-function D3CallSpaceGraph({ points, visibleUntil }) {
+function D3CallSpaceGraph({ points, visibleFrom, visibleUntil }) {
   const svgRef = useRef(null);
   const wrapperRef = useRef(null);
   const [rotation, setRotation] = useState({ yaw: 0.68, pitch: 0.42 });
@@ -91,8 +91,11 @@ function D3CallSpaceGraph({ points, visibleUntil }) {
   const [tooltip, setTooltip] = useState(null);
 
   const visiblePoints = useMemo(
-    () => points.filter((point) => !visibleUntil || Date.parse(point.timestamp) <= visibleUntil),
-    [points, visibleUntil]
+    () => points.filter((point) => {
+      const timestamp = Date.parse(point.timestamp);
+      return (!visibleFrom || timestamp >= visibleFrom) && (!visibleUntil || timestamp <= visibleUntil);
+    }),
+    [points, visibleFrom, visibleUntil]
   );
 
   const normalized = useMemo(() => {
@@ -399,6 +402,7 @@ function App() {
   }, [space.items]);
 
   const activeUntil = timeline.start + (timeline.end - timeline.start) * (rangeStart + (rangeEnd - rangeStart) * (cursor / 100)) / 100;
+  const activeFrom = timeline.start + (timeline.end - timeline.start) * rangeStart / 100;
 
   useEffect(() => {
     if (!playing || timeline.end <= timeline.start) {
@@ -467,7 +471,7 @@ function App() {
         <section className="panel graph-panel">
           <h2>3D Bird Call Space</h2>
           <p className="sub">X: Dominant pitch, Y: Timbre centroid, Z: Tonal spread, Color: confidence, Radius: energy</p>
-          <D3CallSpaceGraph points={space.items || []} visibleUntil={activeUntil} />
+          <D3CallSpaceGraph points={space.items || []} visibleFrom={activeFrom} visibleUntil={activeUntil} />
           <TimelineControls
             timeline={timeline}
             rangeStart={rangeStart}

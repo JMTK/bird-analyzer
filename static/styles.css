@@ -178,7 +178,7 @@ h2 {
 .d3-plot {
   position: relative;
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 8px;
   overflow: hidden;
   background: linear-gradient(145deg, rgba(255, 255, 255, 0.65), rgba(240, 246, 244, 0.65));
   cursor: grab;
@@ -194,10 +194,34 @@ h2 {
   display: block;
 }
 
-.axis-label {
+.axis-legend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  gap: 0.5rem;
   font-family: "IBM Plex Mono", monospace;
-  font-size: 12px;
-  letter-spacing: 0.04em;
+  font-size: 0.72rem;
+  pointer-events: none;
+}
+
+.axis-legend span {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 0.2rem 0.4rem;
+}
+
+.axis-pitch {
+  color: #b6411b;
+}
+
+.axis-timbre {
+  color: #176a64;
+}
+
+.axis-spread {
+  color: #284993;
 }
 
 .graph-hint {
@@ -210,6 +234,111 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0.2rem 0.55rem;
+}
+
+.timeline-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.75rem 1rem;
+  margin-top: 0.8rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.timeline-head {
+  grid-column: span 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.timeline-head h3 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.timeline-head p,
+.backfill-row p {
+  margin: 0.2rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+}
+
+.range-control {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+}
+
+.range-control input {
+  width: 100%;
+  accent-color: var(--accent-2);
+}
+
+.playback-scrubber {
+  grid-column: span 2;
+}
+
+.command-button {
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  padding: 0.45rem 0.7rem;
+  color: #fff;
+  background: var(--ink);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.command-button:hover:not(:disabled) {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+.command-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.metric-guide {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+
+.metric-guide div {
+  border-left: 3px solid var(--accent-2);
+  padding: 0.35rem 0.5rem;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.metric-guide strong,
+.metric-guide span {
+  display: block;
+}
+
+.metric-guide strong {
+  font-size: 0.78rem;
+}
+
+.metric-guide span {
+  margin-top: 0.18rem;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.backfill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding-top: 0.75rem;
 }
 
 .tooltip {
@@ -286,8 +415,36 @@ td {
     grid-template-columns: 1fr;
   }
 
+  .metric-guide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .hero {
     flex-direction: column;
     align-items: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .grid,
+  .hero {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .timeline-controls,
+  .metric-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-head,
+  .backfill-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .timeline-head,
+  .playback-scrubber {
+    grid-column: span 1;
   }
 }
