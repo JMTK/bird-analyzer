@@ -50,19 +50,14 @@ CONFIG = load_runtime_config()
 # Load birdnet models
 print("Pre-loading birdnet models...")
 try:
-  ACOUSTIC_MODEL = birdnet.load("acoustic", "2.4", "tf")  # type: ignore
-except Exception:
-  # Fallback to onnx if tf backend not available
   ACOUSTIC_MODEL = birdnet.load("acoustic", "3.0", "onnx")  # type: ignore
+except Exception:
+  ACOUSTIC_MODEL = None
 
 try:
-  GEO_MODEL = birdnet.load("geo", "2.4", "tf")  # type: ignore
+  GEO_MODEL = birdnet.load("geo", "3.0", "onnx")  # type: ignore
 except Exception:
-  # Fallback if tf backend not available
-  try:
-    GEO_MODEL = birdnet.load("geo", "3.0", "onnx")  # type: ignore
-  except Exception:
-    GEO_MODEL = None
+  GEO_MODEL = None
 
 warnings.filterwarnings("ignore")
 absl.logging.set_verbosity(absl.logging.ERROR)
