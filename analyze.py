@@ -174,6 +174,8 @@ def compute_audio_features(file_path: Path) -> dict:
 
 
 def recording_loop(storage: Storage) -> None:
+  global selected_input_device
+
   print("Recorder thread started")
   while not stop_event.is_set():
     # Throttle recording before capturing audio so a slow processor thread can catch up
@@ -222,6 +224,9 @@ def recording_loop(storage: Storage) -> None:
       write_status("running")
     except Exception as exc:
       print("Recording error: " + str(exc))
+      # Force a fresh device probe next iteration; the cached device may be
+      # busy/unavailable (e.g. transient ALSA errors) even though it last worked.
+      selected_input_device = None
       write_status("running", {"last_error": str(exc)})
       sleep(1)
 
@@ -271,10 +276,13 @@ def process_recording(
 
   # Use the new birdnet 1.1.0 API
   try:
-    # Predict species from audio
+    # Single worker/batch to cap peak memory; birdnet otherwise spawns one worker
+    # per CPU core (each holding a full model copy), which OOM-kills on low-memory devices.
     predictions_result = ACOUSTIC_MODEL.predict(  # type: ignore
       str(file_path),
       default_confidence_threshold=0.1,
+      n_workers=1,
+      batch_size=1,
     )
     prediction_list = [
       (str(row["species"]), float(row["confidence"]))
