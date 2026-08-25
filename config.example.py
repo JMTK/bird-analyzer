@@ -6,6 +6,11 @@ audio_device_override = None
 
 webhook_url = ""
 
+# Storage backend for recordings/predictions: "elasticsearch" or "sqlite".
+# sqlite is a good fit for low-power devices like a Raspberry Pi since it needs no external service.
+storage_backend = "elasticsearch"
+sqlite_path = os.path.join(os.getcwd(), "runtime", "bird-analyzer.db")
+
 elasticsearch_host = "https://localhost:9200"
 elasticsearch_user = "elastic"
 elasticsearch_password = ""

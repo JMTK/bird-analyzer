@@ -15,7 +15,12 @@ The analyzer runs as a split pipeline with two worker threads:
 Data Storage
 ~~~~~~~~~~~~
 
-Elasticsearch indexes store two types of documents:
+Two storage backends are supported, selected via `storage_backend` in `config.py`:
+
+*   **Elasticsearch** (default): run `python scripts/setup_elasticsearch.py` to start the bundled `docker-compose.elastic.yml` stack and wait for it to become healthy. Requires Docker.
+*   **SQLite**: run `python scripts/setup_sqlite.py` to create the database file and tables. Pure Python/stdlib, no external services — a good fit for low-power devices like a Raspberry Pi.
+
+Either backend stores the same two document types:
 
 *   `bird-audio`: one document per recorded audio file with state (recorded/processed/failed) and acoustic features (pitch, spectral centroid, bandwidth, RMS)
 *   `bird-analyzer`: processed species detections with metadata from BirdNET and enrichment API
@@ -41,7 +46,9 @@ Configuration
 
 Settings are loaded from `config.py` (or `config.example.py` as fallback). Required parameters:
 
-*   `elasticsearch_host`: Elasticsearch server URL
+*   `storage_backend`: `"elasticsearch"` (default) or `"sqlite"`. Use `"sqlite"` for a self-contained setup with no external service — a good fit for low-power devices like a Raspberry Pi.
+*   `sqlite_path`: path to the SQLite database file, used when `storage_backend` is `"sqlite"`
+*   `elasticsearch_host`: Elasticsearch server URL (used when `storage_backend` is `"elasticsearch"`)
 *   `elasticsearch_user` / `elasticsearch_password`: authentication credentials
 *   `cert_loc`: path to Elasticsearch CA certificate
 *   `api_key`: API key for bird enrichment service (nuthatch.lastelm.software)
@@ -116,17 +123,24 @@ Installation & Running
 
 	`cp config.example.py config.py`
 
-   Update `config.py` with your Elasticsearch credentials, API key, coordinates, and other settings.
+   Update `config.py` with your API key, coordinates, and other settings.
 
-4. Start the analyzer pipeline:
+4. Set up a storage backend:
+
+   *   Elasticsearch (requires Docker): `python scripts/setup_elasticsearch.py`
+   *   SQLite (works anywhere, no external services): `python scripts/setup_sqlite.py`
+
+   Make sure `storage_backend` in `config.py` matches the one you set up.
+
+5. Start the analyzer pipeline:
 
 	`python analyze.py`
 
-5. In another terminal, start the web server:
+6. In another terminal, start the web server:
 
 	`python server.py`
 
-6. Open `http://localhost:8080` in your browser
+7. Open `http://localhost:8080` in your browser
 
 Next Steps
 ----------

@@ -18,13 +18,13 @@ for _thread_env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THRE
 
 import absl.logging
 import birdnet
-import elasticsearch
 import numpy as np
 import requests
 import sounddevice as sd
 import soundfile as sf
 
 from bird import Bird, Response
+from storage import Storage, create_storage
 
 
 def load_runtime_config() -> dict:
@@ -41,6 +41,8 @@ def load_runtime_config() -> dict:
         "elasticsearch_user": getattr(module, "elasticsearch_user", "elastic"),
         "elasticsearch_password": getattr(module, "elasticsearch_password", ""),
         "cert_loc": getattr(module, "cert_loc", str(Path.cwd() / "http_ca.crt")),
+        "storage_backend": getattr(module, "storage_backend", "elasticsearch"),
+        "sqlite_path": getattr(module, "sqlite_path", str(Path.cwd() / "runtime" / "bird-analyzer.db")),
         "api_key": getattr(module, "api_key", ""),
         "webhook_url": getattr(module, "webhook_url", ""),
         "audio_device_override": getattr(module, "audio_device_override", None),
@@ -69,8 +71,6 @@ absl.logging.set_verbosity(absl.logging.ERROR)
 
 SAMPLE_RATE = 48000
 DURATION_SECONDS = 3
-AUDIO_INDEX_NAME = "bird-audio"
-METADATA_INDEX_NAME = "bird-analyzer"
 RUNTIME_DIR = Path("runtime")
 STATUS_PATH = RUNTIME_DIR / "status.json"
 RECORDINGS_DIR = Path("recordings")
@@ -117,33 +117,6 @@ def write_status(state: str, extra: dict | None = None, force: bool = False) -> 
     if extra:
       payload.update(extra)
     STATUS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def create_es_client() -> elasticsearch.Elasticsearch:
-  return elasticsearch.Elasticsearch(
-    CONFIG["elasticsearch_host"],
-    ca_certs=CONFIG["cert_loc"],
-    http_auth=(CONFIG["elasticsearch_user"], CONFIG["elasticsearch_password"]),
-    max_retries=0,
-    retry_on_timeout=False,
-  )
-
-
-def safe_index(es: elasticsearch.Elasticsearch, index_name: str, document: dict, doc_id: str | None = None) -> None:
-  try:
-    if doc_id is None:
-      es.index(index=index_name, document=document)
-    else:
-      es.index(index=index_name, id=doc_id, document=document)
-  except Exception as exc:
-    print(f"Failed indexing to {index_name}: {exc}")
-
-
-def safe_update(es: elasticsearch.Elasticsearch, index_name: str, doc_id: str, fields: dict) -> None:
-  try:
-    es.update(index=index_name, id=doc_id, doc=fields, doc_as_upsert=True)
-  except Exception as exc:
-    print(f"Failed update to {index_name}/{doc_id}: {exc}")
 
 
 def send_discord_notification(bird: Bird, webhook_url: str) -> None:
@@ -200,7 +173,7 @@ def compute_audio_features(file_path: Path) -> dict:
   }
 
 
-def recording_loop(es: elasticsearch.Elasticsearch) -> None:
+def recording_loop(storage: Storage) -> None:
   print("Recorder thread started")
   while not stop_event.is_set():
     # Throttle recording before capturing audio so a slow processor thread can catch up
@@ -238,13 +211,13 @@ def recording_loop(es: elasticsearch.Elasticsearch) -> None:
         "duration_seconds": DURATION_SECONDS,
         "status": "recorded",
       }
-      safe_index(es, AUDIO_INDEX_NAME, audio_doc, doc_id=recording_id)
+      storage.index_audio(audio_doc, doc_id=recording_id)
       try:
         recordings_queue.put(audio_doc, timeout=5)
       except Full:
         # Processor didn't catch up in time; drop the file instead of leaking disk space.
         print(f"Processing queue still full after wait; discarding {output_file}")
-        safe_update(es, AUDIO_INDEX_NAME, recording_id, {"status": "dropped", "error": "queue full"})
+        storage.update_audio(recording_id, {"status": "dropped", "error": "queue full"})
         output_file.unlink(missing_ok=True)
       write_status("running")
     except Exception as exc:
@@ -286,7 +259,7 @@ def configure_audio_input() -> bool:
 
 
 def process_recording(
-  es: elasticsearch.Elasticsearch,
+  storage: Storage,
   species_in_area: dict | None,
   recording_doc: dict,
 ) -> None:
@@ -371,7 +344,7 @@ def process_recording(
           "rms": features["rms"],
         }
       )
-      safe_index(es, METADATA_INDEX_NAME, metadata_doc)
+      storage.index_metadata(metadata_doc)
 
       if confidence > 0.6:
         archive_name = (
@@ -383,9 +356,7 @@ def process_recording(
     except Exception as exc:
       print("Failed to process prediction: " + str(exc))
 
-  safe_update(
-    es,
-    AUDIO_INDEX_NAME,
+  storage.update_audio(
     recording_id,
     {
       "status": "processed",
@@ -408,7 +379,7 @@ def process_recording(
       print(f"Failed to delete recording with no predictions: {exc}")
 
 
-def processor_loop(es: elasticsearch.Elasticsearch, species_in_area: dict | None) -> None:
+def processor_loop(storage: Storage, species_in_area: dict | None) -> None:
   print("Processor thread started")
   while not stop_event.is_set():
     try:
@@ -418,12 +389,10 @@ def processor_loop(es: elasticsearch.Elasticsearch, species_in_area: dict | None
       continue
 
     try:
-      process_recording(es, species_in_area, recording_doc)
+      process_recording(storage, species_in_area, recording_doc)
     except Exception as exc:
       print("Processing error: " + str(exc))
-      safe_update(
-        es,
-        AUDIO_INDEX_NAME,
+      storage.update_audio(
         recording_doc["recording_id"],
         {
           "status": "failed",
@@ -441,34 +410,22 @@ def main() -> None:
   RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
   ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
 
-  print("Initializing elasticsearch...")
-  es = create_es_client()
-  es_available = False
-  try:
-    es_available = bool(es.ping())
-    if es_available:
-      print("Elasticsearch initialized!")
-    else:
-      print(f"Elasticsearch is not available: {es.info()}")
-  except Exception:
-    print(f"Elasticsearch failed to initialize! {es.info()}")
-
-  if es_available:
-    try:
-      try:
-        es.indices.create(index=AUDIO_INDEX_NAME)
-      except Exception:
-        print("AUDIO_INDEX_NAME already exists, skipping creation")
-        pass
-      try:
-        es.indices.create(index=METADATA_INDEX_NAME)
-      except Exception:
-        print("METADATA_INDEX_NAME already exists, skipping creation")
-        pass
-    except Exception as exc:
-      print("Elasticsearch index setup failed: " + str(exc))
+  backend_name = CONFIG.get("storage_backend", "elasticsearch")
+  print(f"Initializing {backend_name} storage...")
+  storage = create_storage(CONFIG)
+  storage_available = storage.ping()
+  if storage_available:
+    print(f"{backend_name} storage initialized!")
   else:
-    print("Running without Elasticsearch; indexing will retry when connection returns")
+    print(f"{backend_name} storage is not available")
+
+  if storage_available:
+    try:
+      storage.setup()
+    except Exception as exc:
+      print("Storage setup failed: " + str(exc))
+  else:
+    print("Running without storage; indexing will retry when connection returns")
 
   print("Initializing birdnet...")
   configure_audio_input()
@@ -508,8 +465,8 @@ def main() -> None:
   
   write_status("running", {"species_count": len(species_in_area) if species_in_area else 0}, force=True)
 
-  recorder = threading.Thread(target=recording_loop, args=(es,), daemon=True)
-  processor = threading.Thread(target=processor_loop, args=(es, species_in_area), daemon=True)
+  recorder = threading.Thread(target=recording_loop, args=(storage,), daemon=True)
+  processor = threading.Thread(target=processor_loop, args=(storage, species_in_area), daemon=True)
   recorder.start()
   processor.start()
 

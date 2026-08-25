@@ -3,11 +3,10 @@ import json
 import importlib.util
 from pathlib import Path
 
-import elasticsearch
 from flask import Flask, jsonify, render_template
 
-AUDIO_INDEX_NAME = "bird-audio"
-METADATA_INDEX_NAME = "bird-analyzer"
+from storage import create_storage
+
 STATUS_PATH = Path("runtime") / "status.json"
 HEARTBEAT_TIMEOUT_SECONDS = 12
 
@@ -27,24 +26,14 @@ def load_runtime_config() -> dict:
                 "elasticsearch_user": getattr(module, "elasticsearch_user", "elastic"),
                 "elasticsearch_password": getattr(module, "elasticsearch_password", ""),
                 "cert_loc": getattr(module, "cert_loc", str(Path.cwd() / "http_ca.crt")),
+                "storage_backend": getattr(module, "storage_backend", "elasticsearch"),
+                "sqlite_path": getattr(module, "sqlite_path", str(Path.cwd() / "runtime" / "bird-analyzer.db")),
             }
     raise FileNotFoundError("Missing config.py or config.example.py")
 
 
 CONFIG = load_runtime_config()
-
-
-def create_es_client() -> elasticsearch.Elasticsearch:
-    return elasticsearch.Elasticsearch(
-        CONFIG["elasticsearch_host"],
-        ca_certs=CONFIG["cert_loc"],
-        http_auth=(CONFIG["elasticsearch_user"], CONFIG["elasticsearch_password"]),
-        max_retries=0,
-        retry_on_timeout=False,
-    )
-
-
-es = create_es_client()
+storage = create_storage(CONFIG)
 
 
 def parse_timestamp(value: str | None) -> datetime.datetime | None:
@@ -80,22 +69,9 @@ def read_runtime_status() -> dict:
 
 
 def fetch_docs(index_name: str, size: int = 250) -> list[dict]:
-    try:
-        response = es.search(
-            index=index_name,
-            size=size,
-            sort=[{"timestamp": {"order": "desc", "unmapped_type": "date"}}],
-            query={"match_all": {}},
-        )
-        hits = response.get("hits", {}).get("hits", [])
-        docs = []
-        for hit in hits:
-            item = hit.get("_source", {})
-            item["_id"] = hit.get("_id")
-            docs.append(item)
-        return docs
-    except Exception:
-        return []
+    if index_name == "audio":
+        return storage.fetch_audio(size)
+    return storage.fetch_metadata(size)
 
 
 @app.get("/")
@@ -110,19 +86,19 @@ def api_status():
 
 @app.get("/api/audio")
 def api_audio():
-    docs = fetch_docs(AUDIO_INDEX_NAME)
+    docs = fetch_docs("audio")
     return jsonify({"count": len(docs), "items": docs})
 
 
 @app.get("/api/processed")
 def api_processed():
-    docs = fetch_docs(METADATA_INDEX_NAME)
+    docs = fetch_docs("metadata")
     return jsonify({"count": len(docs), "items": docs})
 
 
 @app.get("/api/space")
 def api_space():
-    audio_docs = fetch_docs(AUDIO_INDEX_NAME, size=400)
+    audio_docs = fetch_docs("audio", size=400)
     points = []
     for doc in audio_docs:
         if doc.get("status") != "processed":
