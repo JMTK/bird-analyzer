@@ -53,8 +53,9 @@ Settings are loaded from `config.py` (or `config.example.py` as fallback). Requi
 *   `cert_loc`: path to Elasticsearch CA certificate
 *   `api_key`: API key for bird enrichment service (nuthatch.lastelm.software)
 *   `webhook_url`: Discord webhook URL for notifications (optional)
-*   `offline_mode`: defaults to `True`; disables remote Geo model loading and avoids BirdNET downloads when the acoustic model is not cached locally
-*   `enable_online_enrichment`: defaults to `False`; set to `True` with an `api_key` to request optional Nuthatch metadata
+*   `offline_mode`: when `True`, prevents BirdNET model downloads while allowing cached models to load
+*   `allow_model_downloads`: defaults to `False`; set to `True` temporarily while connected to download missing BirdNET model assets
+*   `enable_online_enrichment`: set to `True` with an `api_key` to request optional Nuthatch metadata
 *   `audio_device_override`: specific audio device index or name (optional; defaults to first available input device)
 *   `location_latitude` / `location_longitude`: geographic coordinates for species predictions
 

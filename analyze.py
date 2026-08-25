@@ -23,6 +23,7 @@ import requests
 import sounddevice as sd
 import soundfile as sf
 from birdnet.acoustic.models.v3_0.onnx import AcousticOnnxDownloaderV3_0
+from birdnet.geo.models.v3_0.onnx import GeoOnnxDownloaderV3_0
 
 from bird import Bird, Response
 from storage import Storage, create_available_storage
@@ -51,6 +52,7 @@ def load_runtime_config() -> dict:
         "prediction_workers": getattr(module, "prediction_workers", 1),
         "prediction_batch_size": getattr(module, "prediction_batch_size", 1),
         "offline_mode": getattr(module, "offline_mode", True),
+        "allow_model_downloads": getattr(module, "allow_model_downloads", False),
         "enable_online_enrichment": getattr(module, "enable_online_enrichment", False),
         "location_latitude": getattr(module, "location_latitude"),
         "location_longitude": getattr(module, "location_longitude"),
@@ -65,10 +67,18 @@ def acoustic_model_is_available_offline() -> bool:
   return AcousticOnnxDownloaderV3_0._check_acoustic_model_available("fp32")
 
 
+def geo_model_is_available_offline() -> bool:
+  return GeoOnnxDownloaderV3_0._check_geo_model_available("fp32")
+
+
+def can_download_models() -> bool:
+  return CONFIG["allow_model_downloads"] and not CONFIG["offline_mode"]
+
+
 # Load birdnet models
 print("Pre-loading birdnet models...")
 try:
-  if CONFIG["offline_mode"] and not acoustic_model_is_available_offline():
+  if not acoustic_model_is_available_offline() and not can_download_models():
     print("Acoustic model is not cached; predictions will wait until it is installed locally")
     ACOUSTIC_MODEL = None
   else:
@@ -76,10 +86,15 @@ try:
 except Exception:
   ACOUSTIC_MODEL = None
 
-try:
-  GEO_MODEL = None if CONFIG["offline_mode"] else birdnet.load("geo", "3.0", "onnx")  # type: ignore
-except Exception:
-  GEO_MODEL = None
+GEO_MODEL = None
+geo_model_error = ""
+if geo_model_is_available_offline() or can_download_models():
+  try:
+    GEO_MODEL = birdnet.load("geo", "3.0", "onnx")  # type: ignore
+  except Exception as exc:
+    geo_model_error = str(exc)
+else:
+  geo_model_error = "model is not cached locally"
 
 warnings.filterwarnings("ignore")
 absl.logging.set_verbosity(absl.logging.ERROR)
@@ -492,7 +507,10 @@ def main() -> None:
       print(f"Warning: Could not get species by location ({e})")
       species_in_area = None
   else:
-    print("Warning: Geo model not available, proceeding without geographical filtering")
+    print(
+      "Geo model unavailable "
+      f"({geo_model_error}); proceeding without geographical filtering"
+    )
   
   write_status("running", {"species_count": len(species_in_area) if species_in_area else 0}, force=True)
 

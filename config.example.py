@@ -9,6 +9,8 @@ webhook_url = ""
 # Run without external services. BirdNET models must be downloaded or copied to
 # the device before enabling this mode.
 offline_mode = False
+# Set to True only while connected to download missing BirdNET model assets.
+allow_model_downloads = True
 enable_online_enrichment = True
 
 # Storage backend for recordings/predictions: "elasticsearch" or "sqlite".
