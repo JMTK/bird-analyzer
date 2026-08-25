@@ -62,28 +62,71 @@ Key Features
 *   Archive storage for significant audio clips
 *   Web UI with 3D acoustic visualization
 
+Audio Device Setup
+------------------
+
+The analyzer requires a working audio input device (microphone). Follow the platform-specific setup below if you encounter audio device issues.
+
+**Linux**
+
+Install PortAudio development libraries:
+
+```bash
+sudo apt-get install libportaudio2
+```
+
+If that doesn't work, also try installing ALSA (Advanced Linux Sound Architecture):
+
+```bash
+sudo apt-get install libasound-dev
+```
+
+**macOS**
+
+Audio support is typically built-in. If you encounter issues, ensure your microphone is properly connected and permitted in:
+
+- System Preferences > Security & Privacy > Microphone
+
+You may also need to reinstall dependencies:
+
+```bash
+pip install --upgrade sounddevice soundfile
+```
+
+**Windows**
+
+Audio support is typically built-in. If you encounter issues:
+
+1. Check Device Manager to ensure your microphone is recognized
+2. Ensure your microphone is set as the default input device in Sound Settings
+3. Check Windows Privacy Settings (Settings > Privacy > Microphone) and grant app permissions
+
+You can also override the audio device in `config.py` by setting `audio_device_override` to a specific device index.
+
 Installation & Running
 ----------------------
 
-1. Install dependencies:
+1. Install audio device libraries (see "Audio Device Setup" section above for your OS)
+
+2. Install Python dependencies:
 
 	`pip install -r requirements.txt`
 
-2. Create `config.py` from `config.example.py` and set your parameters:
+3. Create `config.py` from `config.example.py` and set your parameters:
 
 	`cp config.example.py config.py`
 
    Update `config.py` with your Elasticsearch credentials, API key, coordinates, and other settings.
 
-3. Start the analyzer pipeline:
+4. Start the analyzer pipeline:
 
 	`python analyze.py`
 
-4. In another terminal, start the web server:
+5. In another terminal, start the web server:
 
 	`python server.py`
 
-5. Open `http://localhost:8080` in your browser
+6. Open `http://localhost:8080` in your browser
 
 Next Steps
 ----------
