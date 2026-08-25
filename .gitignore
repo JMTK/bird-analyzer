@@ -1,0 +1,8 @@
+output.wav
+.DS_Store
+archives
+http_ca.crt
+*.wav
+install-pyenv-win.ps1
+__pycache__/*
+config.py
