@@ -405,7 +405,10 @@ def main() -> None:
   es_available = False
   try:
     es_available = bool(es.ping())
-    print("Elasticsearch initialized!")
+    if es_available:
+      print("Elasticsearch initialized!")
+    else:
+      print(f"Elasticsearch is not available: {es.info()}")
   except Exception:
     print("Elasticsearch failed to initialize!")
 
@@ -414,10 +417,12 @@ def main() -> None:
       try:
         es.indices.create(index=AUDIO_INDEX_NAME)
       except Exception:
+        print("AUDIO_INDEX_NAME already exists, skipping creation")
         pass
       try:
         es.indices.create(index=METADATA_INDEX_NAME)
       except Exception:
+        print("METADATA_INDEX_NAME already exists, skipping creation")
         pass
     except Exception as exc:
       print("Elasticsearch index setup failed: " + str(exc))
