@@ -3,7 +3,7 @@ import json
 import importlib.util
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, abort, jsonify, render_template, send_file
 import requests
 
 from bird import Response
@@ -11,6 +11,7 @@ from storage import create_available_storage
 
 STATUS_PATH = Path("runtime") / "status.json"
 HEARTBEAT_TIMEOUT_SECONDS = 12
+AUDIO_DIRECTORIES = (Path("recordings").resolve(), Path("archives").resolve())
 
 app = Flask(__name__)
 
@@ -96,6 +97,19 @@ def display_species(audio_doc: dict, metadata: dict | None) -> str:
     return audio_doc.get("top_prediction") or (metadata or {}).get("name") or "Unknown"
 
 
+def find_audio_document(recording_id: str) -> dict | None:
+    for document in storage.fetch_audio(1000):
+        if str(document.get("recording_id") or document.get("_id")) == recording_id:
+            return document
+    return None
+
+
+def is_allowed_audio_file(file_path: Path) -> bool:
+    return file_path.suffix.lower() == ".wav" and any(
+        file_path.is_relative_to(directory) for directory in AUDIO_DIRECTORIES
+    )
+
+
 def needs_enrichment(metadata: dict) -> bool:
     return not any(metadata.get(field) for field in ("family", "order", "status", "images"))
 
@@ -161,9 +175,22 @@ def api_audio():
     for doc in docs:
         metadata = metadata_lookup.get(str(doc.get("recording_id") or ""))
         doc["display_species"] = display_species(doc, metadata)
+        doc["display_scientific_name"] = (metadata or {}).get("sciName", "")
+        doc["display_family"] = (metadata or {}).get("family", "")
         if not doc.get("top_confidence") and metadata:
             doc["display_confidence"] = metadata.get("confidence", 0.0)
     return jsonify({"count": len(docs), "items": docs})
+
+
+@app.get("/api/audio/<recording_id>/file")
+def api_audio_file(recording_id: str):
+    document = find_audio_document(recording_id)
+    if document is None or not document.get("file_path"):
+        abort(404)
+    file_path = Path(document["file_path"]).resolve()
+    if not is_allowed_audio_file(file_path) or not file_path.is_file():
+        abort(404)
+    return send_file(file_path, mimetype="audio/wav", conditional=True)
 
 
 @app.get("/api/processed")
@@ -203,6 +230,8 @@ def api_space():
                 "recording_id": doc.get("recording_id") or doc.get("_id"),
                 "timestamp": doc.get("timestamp"),
                 "species": display_species(doc, metadata),
+                "scientific_name": (metadata or {}).get("sciName", ""),
+                "family": (metadata or {}).get("family", ""),
                 "x_pitch_hz": doc.get("pitch_hz", 0.0),
                 "y_timbre_centroid_hz": doc.get("spectral_centroid_hz", 0.0),
                 "z_tonal_spread_hz": doc.get("spectral_bandwidth_hz", 0.0),

@@ -42,6 +42,10 @@ function fmtTime(value) {
   return parsed.toLocaleString();
 }
 
+function includesFilter(value, query) {
+  return !query || String(value || "").toLowerCase().includes(query.toLowerCase());
+}
+
 function Pill({ status }) {
   const value = (status || "unknown").toLowerCase();
   return <span className={`pill ${value}`}>{value}</span>;
@@ -309,7 +313,7 @@ function D3CallSpaceGraph({ points, visibleFrom, visibleUntil }) {
   );
 }
 
-function TimelineControls({ timeline, rangeStart, rangeEnd, cursor, playing, onRangeStart, onRangeEnd, onCursor, onToggle }) {
+function TimelineControls({ timeline, rangeStart, rangeEnd, cursor, playing, visibleCount, totalCount, onRangeStart, onRangeEnd, onCursor, onToggle }) {
   const hasData = timeline.end > timeline.start;
   const span = timeline.end - timeline.start;
   const windowStart = timeline.start + span * (rangeStart / 100);
@@ -321,7 +325,7 @@ function TimelineControls({ timeline, rangeStart, rangeEnd, cursor, playing, onR
       <div className="timeline-head">
         <div>
           <h3>Detection Playback</h3>
-          <p>{hasData ? `${fmtTime(windowStart)} to ${fmtTime(windowEnd)}` : "Waiting for timestamped detections"}</p>
+          <p>{hasData ? `${fmtTime(windowStart)} to ${fmtTime(windowEnd)} | ${visibleCount} of ${totalCount} points visible` : "Waiting for timestamped detections"}</p>
         </div>
         <button type="button" className="command-button" onClick={onToggle} disabled={!hasData}>
           {playing ? "Pause" : "Play"}
@@ -355,6 +359,12 @@ function App() {
   const [playing, setPlaying] = useState(false);
   const [backfillMessage, setBackfillMessage] = useState("");
   const [refreshToken, setRefreshToken] = useState(0);
+  const [processedOnly, setProcessedOnly] = useState(true);
+  const [confidenceMin, setConfidenceMin] = useState(0);
+  const [confidenceMax, setConfidenceMax] = useState(100);
+  const [nameFilter, setNameFilter] = useState("");
+  const [scientificFilter, setScientificFilter] = useState("");
+  const [familyFilter, setFamilyFilter] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -393,16 +403,37 @@ function App() {
     };
   }, [refreshToken]);
 
+  function matchesFilters(item) {
+    const confidence = Number(item.confidence ?? item.top_confidence ?? item.display_confidence ?? 0);
+    return (
+      confidence >= confidenceMin / 100 &&
+      confidence <= confidenceMax / 100 &&
+      includesFilter(item.species || item.display_species || item.name, nameFilter) &&
+      includesFilter(item.scientific_name || item.display_scientific_name || item.sciName, scientificFilter) &&
+      includesFilter(item.family || item.display_family, familyFilter)
+    );
+  }
+
+  const filteredSpace = (space.items || []).filter(matchesFilters);
+  const filteredProcessed = (processed.items || []).filter(matchesFilters);
+  const visibleAudio = (audio.items || []).filter(
+    (item) => (!processedOnly || item.status === "processed") && matchesFilters(item)
+  );
+
   const timeline = useMemo(() => {
-    const timestamps = (space.items || []).map((point) => Date.parse(point.timestamp)).filter(Number.isFinite);
+    const timestamps = filteredSpace.map((point) => Date.parse(point.timestamp)).filter(Number.isFinite);
     if (!timestamps.length) {
       return { start: 0, end: 0 };
     }
     return { start: Math.min(...timestamps), end: Math.max(...timestamps) };
-  }, [space.items]);
+  }, [filteredSpace]);
 
   const activeUntil = timeline.start + (timeline.end - timeline.start) * (rangeStart + (rangeEnd - rangeStart) * (cursor / 100)) / 100;
   const activeFrom = timeline.start + (timeline.end - timeline.start) * rangeStart / 100;
+  const visiblePointCount = filteredSpace.filter((point) => {
+    const timestamp = Date.parse(point.timestamp);
+    return timestamp >= activeFrom && timestamp <= activeUntil;
+  }).length;
 
   useEffect(() => {
     if (!playing || timeline.end <= timeline.start) {
@@ -422,6 +453,25 @@ function App() {
     } catch (err) {
       setBackfillMessage(err.message || "Backfill could not run");
     }
+  }
+
+  function updateRangeStart(value) {
+    setRangeStart(value);
+    setCursor(0);
+  }
+
+  function updateRangeEnd(value) {
+    setRangeEnd(value);
+    setCursor(0);
+  }
+
+  function togglePlayback() {
+    setPlaying((isPlaying) => {
+      if (!isPlaying && cursor >= 100) {
+        setCursor(0);
+      }
+      return !isPlaying;
+    });
   }
 
   const state = status.state || "unknown";
@@ -454,34 +504,65 @@ function App() {
           <h2>Pipeline Summary</h2>
           <div className="stat-cards">
             <div className="card">
-              <span>Recorded Sounds</span>
-              <strong>{fmt(audio.count, "0")}</strong>
+              <span>{processedOnly ? "Processed Audio" : "Recorded Sounds"}</span>
+              <strong>{fmt(visibleAudio.length, "0")}</strong>
             </div>
             <div className="card">
               <span>Processed Sounds</span>
-              <strong>{fmt(processed.count, "0")}</strong>
+              <strong>{fmt(filteredProcessed.length, "0")}</strong>
             </div>
             <div className="card">
               <span>3D Points</span>
-              <strong>{fmt(space.count, "0")}</strong>
+              <strong>{fmt(filteredSpace.length, "0")}</strong>
             </div>
+          </div>
+        </section>
+
+        <section className="panel filters-panel">
+          <div className="panel-heading">
+            <h2>Detection Filters</h2>
+            <span className="filter-summary">Confidence {fmtNumber(confidenceMin / 100, 2)} to {fmtNumber(confidenceMax / 100, 2)}</span>
+          </div>
+          <div className="filter-grid">
+            <label className="range-control">
+              <span>Minimum confidence</span>
+              <input type="range" min="0" max={confidenceMax} value={confidenceMin} onChange={(event) => setConfidenceMin(Number(event.target.value))} />
+            </label>
+            <label className="range-control">
+              <span>Maximum confidence</span>
+              <input type="range" min={confidenceMin} max="100" value={confidenceMax} onChange={(event) => setConfidenceMax(Number(event.target.value))} />
+            </label>
+            <label className="text-filter">
+              <span>Name</span>
+              <input value={nameFilter} onChange={(event) => setNameFilter(event.target.value)} placeholder="e.g. robin" />
+            </label>
+            <label className="text-filter">
+              <span>Scientific name</span>
+              <input value={scientificFilter} onChange={(event) => setScientificFilter(event.target.value)} placeholder="e.g. Turdus" />
+            </label>
+            <label className="text-filter">
+              <span>Family</span>
+              <input value={familyFilter} onChange={(event) => setFamilyFilter(event.target.value)} placeholder="e.g. Turdidae" />
+            </label>
           </div>
         </section>
 
         <section className="panel graph-panel">
           <h2>3D Bird Call Space</h2>
           <p className="sub">X: Dominant pitch, Y: Timbre centroid, Z: Tonal spread, Color: confidence, Radius: energy</p>
-          <D3CallSpaceGraph points={space.items || []} visibleFrom={activeFrom} visibleUntil={activeUntil} />
+          <D3CallSpaceGraph points={filteredSpace} visibleFrom={activeFrom} visibleUntil={activeUntil} />
           <TimelineControls
             timeline={timeline}
             rangeStart={rangeStart}
             rangeEnd={rangeEnd}
             cursor={cursor}
             playing={playing}
-            onRangeStart={setRangeStart}
-            onRangeEnd={setRangeEnd}
+            visibleCount={visiblePointCount}
+            totalCount={filteredSpace.length}
+            onRangeStart={updateRangeStart}
+            onRangeEnd={updateRangeEnd}
             onCursor={setCursor}
-            onToggle={() => setPlaying((value) => !value)}
+            onToggle={togglePlayback}
           />
           <div className="metric-guide">
             <div><strong>Pitch</strong><span>Dominant frequency of the sound. Higher values are generally higher-pitched calls.</span></div>
@@ -492,10 +573,16 @@ function App() {
         </section>
 
         <section className="panel table-panel">
-          <h2>Recorded Audio Index</h2>
+          <div className="panel-heading">
+            <h2>Recorded Audio Index</h2>
+            <label className="filter-toggle">
+              <input type="checkbox" checked={processedOnly} onChange={(event) => setProcessedOnly(event.target.checked)} />
+              <span>Processed only</span>
+            </label>
+          </div>
           <DataTable
-            headers={["Time", "Status", "Top Species", "Confidence", "File"]}
-            rows={(audio.items || []).slice(0, 200).map((item, idx) => (
+            headers={["Time", "Status", "Top Species", "Confidence", "Audio"]}
+            rows={visibleAudio.slice(0, 200).map((item, idx) => (
               <tr key={`${item.recording_id || item._id || "audio"}-${idx}`}>
                 <td>{fmtTime(item.timestamp)}</td>
                 <td>
@@ -503,7 +590,11 @@ function App() {
                 </td>
                 <td>{fmt(item.display_species || item.top_prediction)}</td>
                 <td>{fmtNumber(item.top_confidence || item.display_confidence, 3)}</td>
-                <td title={fmt(item.file_path)}>{fmt(item.file_path)}</td>
+                <td>
+                  {item.recording_id ? (
+                    <audio className="audio-player" controls preload="none" src={`/api/audio/${encodeURIComponent(item.recording_id)}/file`} />
+                  ) : "-"}
+                </td>
               </tr>
             ))}
           />
@@ -517,7 +608,7 @@ function App() {
           <h2>Processed Metadata Index</h2>
           <DataTable
             headers={["Time", "Name", "Scientific", "Confidence", "Family"]}
-            rows={(processed.items || []).slice(0, 200).map((item, idx) => (
+            rows={filteredProcessed.slice(0, 200).map((item, idx) => (
               <tr key={`${item._id || "processed"}-${idx}`}>
                 <td>{fmtTime(item.timestamp)}</td>
                 <td>{fmt(item.name)}</td>
