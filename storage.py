@@ -9,8 +9,8 @@ import datetime
 import json
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
-from typing import Optional
 
 try:
   import elasticsearch
@@ -67,6 +67,9 @@ class Storage:
   def fetch_audio(self, size: int = 250) -> list[dict]:
     raise NotImplementedError
 
+  def fetch_pending_audio(self) -> list[dict]:
+    raise NotImplementedError
+
   def fetch_metadata(self, size: int = 250) -> list[dict]:
     raise NotImplementedError
 
@@ -94,34 +97,24 @@ class ElasticsearchStorage(Storage):
 
   def setup(self) -> None:
     for index_name in (self.audio_index, self.metadata_index):
-      try:
+      if not self.client.indices.exists(index=index_name):
         self.client.indices.create(index=index_name)
-      except Exception:
-        print(f"{index_name} already exists, skipping creation")
 
   def index_audio(self, document: dict, doc_id: str) -> None:
-    try:
-      self.client.index(index=self.audio_index, id=doc_id, document=document)
-    except Exception as exc:
-      print(f"Failed indexing to {self.audio_index}: {exc}")
+    self.client.index(index=self.audio_index, id=doc_id, document=document)
 
   def update_audio(self, doc_id: str, fields: dict) -> None:
-    try:
-      self.client.update(index=self.audio_index, id=doc_id, doc=fields, doc_as_upsert=True)
-    except Exception as exc:
-      print(f"Failed update to {self.audio_index}/{doc_id}: {exc}")
+    self.client.update(index=self.audio_index, id=doc_id, doc=fields, doc_as_upsert=True)
 
   def index_metadata(self, document: dict) -> None:
-    try:
-      self.client.index(index=self.metadata_index, document=document)
-    except Exception as exc:
-      print(f"Failed indexing to {self.metadata_index}: {exc}")
+    self.client.index(
+      index=self.metadata_index,
+      id=document.get("_remote_id"),
+      document=document,
+    )
 
   def update_metadata(self, doc_id: str, fields: dict) -> None:
-    try:
-      self.client.update(index=self.metadata_index, id=doc_id, doc=fields)
-    except Exception as exc:
-      print(f"Failed update to {self.metadata_index}/{doc_id}: {exc}")
+    self.client.update(index=self.metadata_index, id=doc_id, doc=fields)
 
   def get_enrichment_cache(self, cache_key: str) -> dict | None:
     return None
@@ -139,28 +132,40 @@ class ElasticsearchStorage(Storage):
     return self._fetch(self.metadata_index, size)
 
   def _fetch(self, index_name: str, size: int) -> list[dict]:
-    try:
-      response = self.client.search(
-        index=index_name,
-        size=size,
-        sort=[{"timestamp": {"order": "desc", "unmapped_type": "date"}}],
-        query={"match_all": {}},
-      )
-      hits = response.get("hits", {}).get("hits", [])
-      docs = []
-      for hit in hits:
-        item = hit.get("_source", {})
-        item["_id"] = hit.get("_id")
-        docs.append(item)
-      return docs
-    except Exception:
-      return []
+    response = self.client.search(
+      index=index_name,
+      size=size,
+      sort=[{"timestamp": {"order": "desc", "unmapped_type": "date"}}],
+      query={"match_all": {}},
+    )
+    hits = response.get("hits", {}).get("hits", [])
+    docs = []
+    for hit in hits:
+      item = hit.get("_source", {})
+      item["_id"] = hit.get("_id")
+      docs.append(item)
+    return docs
+
+  def fetch_pending_audio(self) -> list[dict]:
+    response = self.client.search(
+      index=self.audio_index,
+      size=10000,
+      sort=[{"timestamp": {"order": "asc", "unmapped_type": "date"}}],
+      query={"terms": {"status.keyword": ["recorded", "awaiting_acoustic_model"]}},
+    )
+    hits = response.get("hits", {}).get("hits", [])
+    docs = []
+    for hit in hits:
+      item = hit.get("_source", {})
+      item["_id"] = hit.get("_id")
+      docs.append(item)
+    return docs
 
 
 class SqliteStorage(Storage):
   """Stores documents as JSON blobs, mirroring Elasticsearch's flexible schema."""
 
-  def __init__(self, db_path: str):
+  def __init__(self, db_path: str, mirror_enabled: bool = False):
     self.db_path = Path(db_path)
     self.db_path.parent.mkdir(parents=True, exist_ok=True)
     # Single shared connection guarded by a lock; sqlite3 connections aren't safe
@@ -168,6 +173,7 @@ class SqliteStorage(Storage):
     self._lock = threading.Lock()
     self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
     self._conn.execute("PRAGMA journal_mode=WAL")
+    self._mirror_enabled = mirror_enabled
 
   def ping(self) -> bool:
     try:
@@ -214,72 +220,106 @@ class SqliteStorage(Storage):
         )
         """
       )
+      self._conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS remote_outbox (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          method TEXT NOT NULL,
+          payload TEXT NOT NULL
+        )
+        """
+      )
       self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_timestamp ON audio(timestamp)")
       self._conn.execute("CREATE INDEX IF NOT EXISTS idx_metadata_timestamp ON metadata(timestamp)")
       self._conn.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_requests_timestamp ON enrichment_requests(requested_at)")
       self._conn.commit()
 
   def index_audio(self, document: dict, doc_id: str) -> None:
-    try:
-      timestamp = _stringify_timestamp(document.get("timestamp"))
-      with self._lock:
-        self._conn.execute(
-          "INSERT INTO audio (recording_id, timestamp, document) VALUES (?, ?, ?) "
-          "ON CONFLICT(recording_id) DO UPDATE SET timestamp=excluded.timestamp, document=excluded.document",
-          (doc_id, timestamp, _dumps(document)),
-        )
-        self._conn.commit()
-    except Exception as exc:
-      print(f"Failed indexing audio record {doc_id}: {exc}")
+    timestamp = _stringify_timestamp(document.get("timestamp"))
+    with self._lock:
+      self._conn.execute(
+        "INSERT INTO audio (recording_id, timestamp, document) VALUES (?, ?, ?) "
+        "ON CONFLICT(recording_id) DO UPDATE SET timestamp=excluded.timestamp, document=excluded.document",
+        (doc_id, timestamp, _dumps(document)),
+      )
+      if self._mirror_enabled:
+        self._enqueue_remote_operation_locked("index_audio", [document, doc_id])
+      self._conn.commit()
 
   def update_audio(self, doc_id: str, fields: dict) -> None:
-    try:
-      with self._lock:
-        row = self._conn.execute(
-          "SELECT document FROM audio WHERE recording_id = ?", (doc_id,)
-        ).fetchone()
-        existing = json.loads(row[0]) if row else {}
-        existing.update(fields)
-        timestamp = _stringify_timestamp(existing.get("timestamp"))
-        self._conn.execute(
-          "INSERT INTO audio (recording_id, timestamp, document) VALUES (?, ?, ?) "
-          "ON CONFLICT(recording_id) DO UPDATE SET timestamp=excluded.timestamp, document=excluded.document",
-          (doc_id, timestamp, _dumps(existing)),
-        )
-        self._conn.commit()
-    except Exception as exc:
-      print(f"Failed update to audio/{doc_id}: {exc}")
+    with self._lock:
+      row = self._conn.execute(
+        "SELECT document FROM audio WHERE recording_id = ?", (doc_id,)
+      ).fetchone()
+      existing = json.loads(row[0]) if row else {}
+      existing.update(fields)
+      timestamp = _stringify_timestamp(existing.get("timestamp"))
+      self._conn.execute(
+        "INSERT INTO audio (recording_id, timestamp, document) VALUES (?, ?, ?) "
+        "ON CONFLICT(recording_id) DO UPDATE SET timestamp=excluded.timestamp, document=excluded.document",
+        (doc_id, timestamp, _dumps(existing)),
+      )
+      if self._mirror_enabled:
+        self._enqueue_remote_operation_locked("update_audio", [doc_id, fields])
+      self._conn.commit()
 
   def index_metadata(self, document: dict) -> None:
-    try:
-      timestamp = _stringify_timestamp(document.get("timestamp"))
-      with self._lock:
-        self._conn.execute(
-          "INSERT INTO metadata (timestamp, document) VALUES (?, ?)",
-          (timestamp, _dumps(document)),
-        )
-        self._conn.commit()
-    except Exception as exc:
-      print(f"Failed indexing metadata record: {exc}")
+    if self._mirror_enabled and not document.get("_remote_id"):
+      document["_remote_id"] = str(uuid.uuid4())
+    timestamp = _stringify_timestamp(document.get("timestamp"))
+    with self._lock:
+      self._conn.execute(
+        "INSERT INTO metadata (timestamp, document) VALUES (?, ?)",
+        (timestamp, _dumps(document)),
+      )
+      if self._mirror_enabled:
+        self._enqueue_remote_operation_locked("index_metadata", [document])
+      self._conn.commit()
 
   def update_metadata(self, doc_id: str, fields: dict) -> None:
-    try:
-      with self._lock:
-        row = self._conn.execute(
-          "SELECT document FROM metadata WHERE id = ?", (doc_id,)
-        ).fetchone()
-        if row is None:
-          return
-        existing = json.loads(row[0])
-        existing.update(fields)
-        timestamp = _stringify_timestamp(existing.get("timestamp"))
-        self._conn.execute(
-          "UPDATE metadata SET timestamp = ?, document = ? WHERE id = ?",
-          (timestamp, _dumps(existing), doc_id),
-        )
-        self._conn.commit()
-    except Exception as exc:
-      print(f"Failed update to metadata/{doc_id}: {exc}")
+    with self._lock:
+      row = self._conn.execute(
+        "SELECT document FROM metadata WHERE id = ?", (doc_id,)
+      ).fetchone()
+      if row is None:
+        raise KeyError(f"Metadata record {doc_id} does not exist")
+      existing = json.loads(row[0])
+      was_mirrored = bool(existing.get("_remote_id"))
+      if self._mirror_enabled and not existing.get("_remote_id"):
+        existing["_remote_id"] = str(uuid.uuid4())
+      existing.update(fields)
+      timestamp = _stringify_timestamp(existing.get("timestamp"))
+      self._conn.execute(
+        "UPDATE metadata SET timestamp = ?, document = ? WHERE id = ?",
+        (timestamp, _dumps(existing), doc_id),
+      )
+      if self._mirror_enabled:
+        if was_mirrored:
+          self._enqueue_remote_operation_locked(
+            "update_metadata",
+            [existing["_remote_id"], fields],
+          )
+        else:
+          self._enqueue_remote_operation_locked("index_metadata", [existing])
+      self._conn.commit()
+
+  def _enqueue_remote_operation_locked(self, method: str, args: list) -> None:
+    self._conn.execute(
+      "INSERT INTO remote_outbox (method, payload) VALUES (?, ?)",
+      (method, _dumps({"args": args})),
+    )
+
+  def pending_remote_operations(self) -> list[tuple[int, str, dict]]:
+    with self._lock:
+      rows = self._conn.execute(
+        "SELECT id, method, payload FROM remote_outbox ORDER BY id"
+      ).fetchall()
+    return [(row_id, method, json.loads(payload)) for row_id, method, payload in rows]
+
+  def delete_remote_operation(self, operation_id: int) -> None:
+    with self._lock:
+      self._conn.execute("DELETE FROM remote_outbox WHERE id = ?", (operation_id,))
+      self._conn.commit()
 
   def get_enrichment_cache(self, cache_key: str) -> dict | None:
     try:
@@ -326,28 +366,40 @@ class SqliteStorage(Storage):
   def fetch_audio(self, size: int = 250) -> list[dict]:
     return self._fetch("audio", size)
 
+  def fetch_pending_audio(self) -> list[dict]:
+    with self._lock:
+      rows = self._conn.execute(
+        "SELECT rowid, document FROM audio ORDER BY timestamp ASC"
+      ).fetchall()
+    docs = []
+    for rowid, document_json in rows:
+      item = json.loads(document_json)
+      item.setdefault("_id", str(rowid))
+      if item.get("status") in ("recorded", "awaiting_acoustic_model"):
+        docs.append(item)
+    return docs
+
   def fetch_metadata(self, size: int = 250) -> list[dict]:
     return self._fetch("metadata", size)
 
   def _fetch(self, table: str, size: int) -> list[dict]:
-    try:
-      with self._lock:
-        rows = self._conn.execute(
-          f"SELECT rowid, document FROM {table} ORDER BY timestamp DESC LIMIT ?",
-          (size,),
-        ).fetchall()
-      docs = []
-      for rowid, document_json in rows:
-        item = json.loads(document_json)
-        item.setdefault("_id", str(rowid))
-        docs.append(item)
-      return docs
-    except Exception:
-      return []
+    if table not in ("audio", "metadata"):
+      raise ValueError(f"Unsupported storage table: {table}")
+    with self._lock:
+      rows = self._conn.execute(
+        f"SELECT rowid, document FROM {table} ORDER BY timestamp DESC LIMIT ?",
+        (size,),
+      ).fetchall()
+    docs = []
+    for rowid, document_json in rows:
+      item = json.loads(document_json)
+      item.setdefault("_id", str(rowid))
+      docs.append(item)
+    return docs
 
 
 def create_storage(config: dict) -> Storage:
-  backend = str(config.get("storage_backend", "elasticsearch")).strip().lower()
+  backend = str(config.get("storage_backend", "sqlite")).strip().lower()
 
   if backend == "sqlite":
     return SqliteStorage(config.get("sqlite_path", "runtime/bird-analyzer.db"))
@@ -371,40 +423,62 @@ class ResilientStorage(Storage):
   def __init__(self, fallback: SqliteStorage, primary: Storage | None = None):
     self._fallback = fallback
     self._primary = primary
+    self._sync_lock = threading.Lock()
+    self._remote_setup = False
+    self._sync_thread_started = False
 
-  def _primary_is_available(self) -> bool:
-    return self._primary is not None and self._primary.ping()
+  def sync_pending(self) -> int:
+    if self._primary is None or not self._primary.ping():
+      return 0
 
-  def _mirror(self, method_name: str, *args, **kwargs) -> None:
-    if not self._primary_is_available():
+    synced = 0
+    with self._sync_lock:
+      try:
+        if not self._remote_setup:
+          self._primary.setup()
+          self._remote_setup = True
+        for operation_id, method, payload in self._fallback.pending_remote_operations():
+          getattr(self._primary, method)(*payload["args"])
+          self._fallback.delete_remote_operation(operation_id)
+          synced += 1
+      except Exception as exc:
+        print(f"Failed syncing to configured storage; pending changes retained locally: {exc}")
+    return synced
+
+  def start_sync_thread(self) -> None:
+    if self._sync_thread_started:
       return
-    try:
-      getattr(self._primary, method_name)(*args, **kwargs)
-    except Exception as exc:
-      print(f"Failed mirroring to configured storage: {exc}")
+    self._sync_thread_started = True
+
+    def sync_loop() -> None:
+      while True:
+        threading.Event().wait(30)
+        self.sync_pending()
+
+    threading.Thread(target=sync_loop, daemon=True).start()
 
   def ping(self) -> bool:
     return self._fallback.ping()
 
   def setup(self) -> None:
     self._fallback.setup()
-    self._mirror("setup")
+    self.sync_pending()
 
   def index_audio(self, document: dict, doc_id: str) -> None:
     self._fallback.index_audio(document, doc_id)
-    self._mirror("index_audio", document, doc_id)
+    self.sync_pending()
 
   def update_audio(self, doc_id: str, fields: dict) -> None:
     self._fallback.update_audio(doc_id, fields)
-    self._mirror("update_audio", doc_id, fields)
+    self.sync_pending()
 
   def index_metadata(self, document: dict) -> None:
     self._fallback.index_metadata(document)
-    self._mirror("index_metadata", document)
+    self.sync_pending()
 
   def update_metadata(self, doc_id: str, fields: dict) -> None:
     self._fallback.update_metadata(doc_id, fields)
-    self._mirror("update_metadata", doc_id, fields)
+    self.sync_pending()
 
   def get_enrichment_cache(self, cache_key: str) -> dict | None:
     return self._fallback.get_enrichment_cache(cache_key)
@@ -418,28 +492,32 @@ class ResilientStorage(Storage):
   def fetch_audio(self, size: int = 250) -> list[dict]:
     return self._fallback.fetch_audio(size)
 
+  def fetch_pending_audio(self) -> list[dict]:
+    return self._fallback.fetch_pending_audio()
+
   def fetch_metadata(self, size: int = 250) -> list[dict]:
     return self._fallback.fetch_metadata(size)
 
 
 def create_available_storage(config: dict) -> Storage:
   """Return storage that continues operating through remote-backend outages."""
-  backend = str(config.get("storage_backend", "elasticsearch")).strip().lower()
+  backend = str(config.get("storage_backend", "sqlite")).strip().lower()
   if backend == "sqlite":
     storage = SqliteStorage(config.get("sqlite_path", "runtime/bird-analyzer.db"))
     storage.setup()
     return storage
 
-  fallback = SqliteStorage(config.get("sqlite_path", "runtime/bird-analyzer.db"))
+  fallback = SqliteStorage(config.get("sqlite_path", "runtime/bird-analyzer.db"), mirror_enabled=True)
   fallback.setup()
   try:
     primary = create_storage(config)
     if not primary.ping():
       print("Configured storage is unavailable; continuing with local SQLite storage")
-    else:
-      primary.setup()
   except Exception as exc:
     print(f"Failed to initialize configured storage ({exc}); continuing with local SQLite storage")
     primary = None
 
-  return ResilientStorage(fallback, primary)
+  storage = ResilientStorage(fallback, primary)
+  storage.sync_pending()
+  storage.start_sync_thread()
+  return storage

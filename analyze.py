@@ -43,7 +43,7 @@ def load_runtime_config() -> dict:
         "elasticsearch_user": getattr(module, "elasticsearch_user", "elastic"),
         "elasticsearch_password": getattr(module, "elasticsearch_password", ""),
         "cert_loc": getattr(module, "cert_loc", str(Path.cwd() / "http_ca.crt")),
-        "storage_backend": getattr(module, "storage_backend", "elasticsearch"),
+        "storage_backend": getattr(module, "storage_backend", "sqlite"),
         "sqlite_path": getattr(module, "sqlite_path", str(Path.cwd() / "runtime" / "bird-analyzer.db")),
         "api_key": getattr(module, "api_key", ""),
         "webhook_url": getattr(module, "webhook_url", ""),
@@ -472,6 +472,29 @@ def processor_loop(storage: Storage, species_in_area: dict | None) -> None:
       recordings_queue.task_done()
 
 
+def recover_pending_recordings(storage: Storage) -> int:
+  recordings_root = RECORDINGS_DIR.resolve()
+  recovered = 0
+  for recording_doc in storage.fetch_pending_audio():
+    recording_id = str(recording_doc.get("recording_id") or "")
+    file_path = Path(str(recording_doc.get("file_path") or "")).resolve()
+    if (
+      not recording_id
+      or not file_path.is_relative_to(recordings_root)
+      or not file_path.is_file()
+    ):
+      if recording_id:
+        storage.update_audio(
+          recording_id,
+          {"status": "failed", "error": "Pending recording file is missing or outside recordings/"},
+        )
+      print(f"Skipping invalid pending recording: {file_path}")
+      continue
+    recordings_queue.put(recording_doc)
+    recovered += 1
+  return recovered
+
+
 def main() -> None:
   RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
   RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -524,8 +547,11 @@ def main() -> None:
 
   recorder = threading.Thread(target=recording_loop, args=(storage,), daemon=True)
   processor = threading.Thread(target=processor_loop, args=(storage, species_in_area), daemon=True)
-  recorder.start()
   processor.start()
+  recovered = recover_pending_recordings(storage)
+  if recovered:
+    print(f"Resumed {recovered} pending recording(s)")
+  recorder.start()
 
   try:
     while True:

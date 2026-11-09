@@ -1,4 +1,6 @@
-const { useEffect, useMemo, useRef, useState } = React;
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import * as d3 from "d3";
 
 async function getJson(url) {
   const response = await fetch(url);
@@ -635,5 +637,5 @@ function App() {
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById("root"));
+const root = createRoot(document.getElementById("root"));
 root.render(<App />);

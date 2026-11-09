@@ -4,6 +4,10 @@ archives
 http_ca.crt
 *.wav
 install-pyenv-win.ps1
-__pycache__/*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
 config.py
 runtime/*
+static/app.bundle.js

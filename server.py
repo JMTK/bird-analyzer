@@ -30,8 +30,9 @@ def load_runtime_config() -> dict:
                 "elasticsearch_user": getattr(module, "elasticsearch_user", "elastic"),
                 "elasticsearch_password": getattr(module, "elasticsearch_password", ""),
                 "cert_loc": getattr(module, "cert_loc", str(Path.cwd() / "http_ca.crt")),
-                "storage_backend": getattr(module, "storage_backend", "elasticsearch"),
+                "storage_backend": getattr(module, "storage_backend", "sqlite"),
                 "sqlite_path": getattr(module, "sqlite_path", str(Path.cwd() / "runtime" / "bird-analyzer.db")),
+                "dashboard_host": getattr(module, "dashboard_host", "127.0.0.1"),
                 "api_key": getattr(module, "api_key", ""),
                 "enable_online_enrichment": getattr(module, "enable_online_enrichment", False),
                 "nuthatch_hourly_limit": getattr(module, "nuthatch_hourly_limit", 500),
@@ -244,4 +245,4 @@ def api_space():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host=CONFIG["dashboard_host"], port=8080, debug=False)

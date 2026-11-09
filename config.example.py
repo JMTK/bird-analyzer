@@ -6,11 +6,10 @@ audio_device_override = None
 
 webhook_url = ""
 
-# Run without external services. BirdNET models must be downloaded or copied to
-# the device before enabling this mode.
+# Prevent BirdNET model downloads while still allowing cached models to load.
 offline_mode = False
-# Set to True only while connected to download missing BirdNET model assets.
-allow_model_downloads = True
+# Enable temporarily while connected to download missing BirdNET model assets.
+allow_model_downloads = False
 enable_online_enrichment = True
 # Shared limit across the analyzer and dashboard backfill.
 nuthatch_hourly_limit = 500
@@ -19,6 +18,10 @@ nuthatch_hourly_limit = 500
 # sqlite is a good fit for low-power devices like a Raspberry Pi since it needs no external service.
 storage_backend = "sqlite"
 sqlite_path = os.path.join(os.getcwd(), "runtime", "bird-analyzer.db")
+
+# The dashboard is local-only by default. Use an authenticated reverse proxy
+# rather than exposing the Flask development server to other devices.
+dashboard_host = "127.0.0.1"
 
 elasticsearch_host = "https://localhost:9200"
 elasticsearch_user = "elastic"
